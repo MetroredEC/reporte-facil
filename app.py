@@ -918,10 +918,32 @@ LAYOUT = """<!doctype html>
   .msghead span { color:var(--ink2); font-weight:500; }
   .replyform { margin-top:14px; }
   /* ------ landing ------ */
-  .hero { text-align:center; padding:64px 0 30px; }
-  .hero h1 { font-size:clamp(2rem, 5vw, 3.1rem); letter-spacing:-.035em; line-height:1.12; }
-  .hero h1 em { font-style:normal; color:var(--acc); }
-  .hero p.lead { color:var(--ink2); font-size:1.12rem; max-width:620px; margin:18px auto 0; }
+  .hero { text-align:center; padding:84px 0 40px; }
+  .hero h1 { font-size:clamp(2.4rem, 6.5vw, 4.2rem); letter-spacing:-.045em; line-height:1.06; font-weight:800; }
+  .hero h1 em { font-style:normal; background:linear-gradient(90deg,#0e9f6e,#2563eb);
+    -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+  .hero p.lead { color:var(--ink2); font-size:clamp(1.05rem,2vw,1.3rem); max-width:640px; margin:22px auto 0; line-height:1.55; }
+  .browserframe { max-width:860px; margin:48px auto 0; background:var(--card); border:1px solid var(--line);
+    border-radius:18px; box-shadow:0 2px 4px rgba(14,27,44,.05), 0 30px 70px rgba(14,27,44,.13); overflow:hidden; text-align:left; }
+  .browserbar { display:flex; align-items:center; gap:8px; padding:12px 16px; border-bottom:1px solid var(--line); background:#fbfcfe; }
+  .browserbar i { width:11px; height:11px; border-radius:50%; display:inline-block; }
+  .browserbar .url { flex:1; text-align:center; background:#eef2f7; border-radius:8px; padding:4px 12px;
+    font-size:.75rem; color:var(--ink2); max-width:340px; margin:0 auto; }
+  .mockbody { padding:26px; }
+  .mockbody .kpis { margin:0 0 14px; }
+  .mockbody .kpi b { font-size:1.2rem; }
+  .statgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:0; margin:26px 0;
+    border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+  .stat { text-align:center; padding:34px 16px; }
+  .stat + .stat { border-left:1px solid var(--line); }
+  @media (max-width:700px) { .stat + .stat { border-left:0; border-top:1px solid var(--line); } }
+  .stat b { display:block; font-size:clamp(2rem,4.5vw,3rem); font-weight:800; letter-spacing:-.04em; color:var(--ink); }
+  .stat b em { font-style:normal; color:var(--acc); }
+  .stat span { color:var(--ink2); font-size:.92rem; }
+  .stat .src { display:block; font-size:.72rem; color:#9aabc2; margin-top:4px; }
+  .bigsection { text-align:center; padding:70px 0 10px; }
+  .bigsection h2 { font-size:clamp(1.7rem,4vw,2.6rem); letter-spacing:-.035em; font-weight:800; }
+  .bigsection p { color:var(--ink2); max-width:560px; margin:14px auto 0; font-size:1.05rem; }
   .cta { display:flex; gap:10px; justify-content:center; margin:30px 0 8px; flex-wrap:wrap; }
   .cta input { min-width:280px; }
   .trust { color:var(--ink2); font-size:.82rem; }
@@ -1021,14 +1043,36 @@ LANDING_BODY = """
   </div>
 
   <div class="hero">
-    <h1>Deja de adivinar<br>qué pasa con <em>tus ventas</em>.</h1>
-    <p class="lead">Sube tu Excel de siempre y recibe al instante un reporte ejecutivo con gráficas:
-    cuánto vendiste, qué producto jala, qué está cayendo — y qué hacer al respecto. En español, para tu negocio.</p>
+    <h1>Tu Excel entra.<br><em>Las decisiones salen.</em></h1>
+    <p class="lead">ReporteFácil convierte tu archivo de ventas en un reporte ejecutivo con gráficas
+    y recomendaciones — en segundos, en español, sin configurar nada.</p>
     <div class="cta">
       <input type="email" id="em" placeholder="tu@correo.com">
       <button class="btn big" onclick="sub()">Quiero acceso anticipado</button>
     </div>
     <div class="trust" id="submsg">Gratis · Sin tarjeta · Sin spam</div>
+
+    <div class="browserframe">
+      <div class="browserbar">
+        <i style="background:#fc5f57"></i><i style="background:#fdbc2e"></i><i style="background:#28c841"></i>
+        <span class="url">reporte-facil.onrender.com · tu reporte semanal</span>
+      </div>
+      <div class="mockbody" id="mockreport"></div>
+    </div>
+  </div>
+
+  <div class="statgrid">
+    <div class="stat"><b>&lt;10<em>s</em></b><span>de Excel a reporte completo</span>
+      <span class="src">medido con archivos de hasta 5 000 filas</span></div>
+    <div class="stat"><b>0</b><span>configuración: detecta tus columnas solo</span>
+      <span class="src">fechas, productos y montos, automático</span></div>
+    <div class="stat"><b>$0</b><span>para empezar, reportes ilimitados</span>
+      <span class="src">sin tarjeta, sin compromiso</span></div>
+  </div>
+
+  <div class="bigsection">
+    <h2>Pruébalo con tus propios datos.</h2>
+    <p>Lo que ves arriba es el producto real. Arrastra tu archivo y míralo con tus números.</p>
   </div>
 
   <div class="card" id="demo">
@@ -1040,7 +1084,8 @@ LANDING_BODY = """
     <div id="result"></div>
   </div>
 
-  <div class="sectionhead"><div class="kicker">Cómo funciona</div><h2>Tres pasos. Cero configuración.</h2></div>
+  <div class="bigsection"><h2>Tres pasos. Cero configuración.</h2>
+    <p>Sin instalar nada, sin capacitación, sin cambiar cómo trabajas hoy.</p></div>
   <div class="steps">
     <div class="step"><span class="n">1</span><b>Sube tu Excel</b><span>El mismo archivo que ya usas. Detectamos fechas, productos y montos automáticamente.</span></div>
     <div class="step"><span class="n">2</span><b>Recibe tu reporte</b><span>KPIs claros, gráficas de tendencia y tu top de productos — en segundos, no en horas.</span></div>
@@ -1116,6 +1161,29 @@ const drop = document.getElementById('drop');
 ['dragover','dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('on'); }));
 ['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('on'); }));
 drop.addEventListener('drop', ev => up(ev.dataTransfer.files[0]));
+
+// Mockup del producto en el hero — datos de EJEMPLO, etiquetados como tales.
+window.addEventListener('load', () => {
+  const mock = document.getElementById('mockreport');
+  if (!mock) return;
+  renderReport(mock, {
+    metrics: {
+      filas: 300, col_monto: 'Total', col_categoria: 'Producto',
+      total: 18557.06, transacciones: 300, promedio: 61.86, maximo: 119.86, variacion_pct: 12.4,
+      serie_semanal: [
+        {semana:'S1', total:1350},{semana:'S2', total:1520},{semana:'S3', total:1410},
+        {semana:'S4', total:1680},{semana:'S5', total:1590},{semana:'S6', total:1740},
+        {semana:'S7', total:1620},{semana:'S8', total:1890},{semana:'S9', total:1760},
+        {semana:'S10', total:1950},{semana:'S11', total:1830},{semana:'S12', total:2055}],
+      top_categorias: [
+        {nombre:'Zapatos', total:4690.9},{nombre:'Camiseta', total:4357.38},
+        {nombre:'Pantalón', total:3538.94},{nombre:'Gorra', total:3277.42},{nombre:'Chompa', total:2692.42}]
+    },
+    resumen: 'Buen cierre de mes: las ventas crecieron 12,4% frente a la semana anterior y el ticket promedio se mantiene estable. Zapatos concentra la mayor facturación; Chompa viene rezagada. Recomendación de la semana: asegura inventario de tus 2 productos top antes del fin de semana, que es cuando más rotan.'
+  });
+  mock.insertAdjacentHTML('beforeend',
+    '<p class="muted sm" style="margin-top:10px">Ejemplo con datos ficticios. Abajo puedes generarlo con tus datos reales.</p>');
+});
 async function up(file) {
   if (!file) return;
   const out = document.getElementById('result');

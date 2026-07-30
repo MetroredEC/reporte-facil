@@ -86,7 +86,9 @@ def now():
 # --------------------------------- analisis ---------------------------------
 DATE_HINTS = ["fecha", "date", "dia", "día", "day", "created", "emitido"]
 AMOUNT_HINTS = ["total", "monto", "amount", "venta", "valor", "precio", "price", "revenue", "importe", "subtotal"]
-CATEGORY_HINTS = ["producto", "product", "item", "categoria", "categoría", "category", "servicio", "cliente", "customer", "vendedor", "sku", "nombre"]
+CATEGORY_HINTS = ["producto", "product", "item", "categoria", "categoría", "category", "servicio", "sku", "nombre"]
+SELLER_HINTS = ["vendedor", "sucursal", "canal", "tienda", "staff", "seller", "empleado", "cajero"]
+DOW_NAMES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
 
 def find_col(df, hints, want_numeric=None):
@@ -108,15 +110,39 @@ def analyze(df):
     amount_col = find_col(df, AMOUNT_HINTS, want_numeric=True)
     date_col = find_col(df, DATE_HINTS)
     cat_col = find_col(df, CATEGORY_HINTS)
-    out = {"filas": int(len(df)), "col_monto": amount_col, "col_fecha": date_col, "col_categoria": cat_col}
+    seller_col = None
+    for h in SELLER_HINTS:
+        for c in df.columns:
+            if h in str(c).lower() and c != cat_col:
+                seller_col = c
+                break
+        if seller_col:
+            break
+    out = {"filas": int(len(df)), "col_monto": amount_col, "col_fecha": date_col,
+           "col_categoria": cat_col, "col_vendedor": seller_col}
+    alerts = []
+
     if amount_col:
         s = pd.to_numeric(df[amount_col], errors="coerce").dropna()
         out.update(total=round(float(s.sum()), 2), promedio=round(float(s.mean()), 2) if len(s) else 0,
                    maximo=round(float(s.max()), 2) if len(s) else 0, transacciones=int(len(s)))
+
     if cat_col and amount_col:
-        top = (df.assign(_m=pd.to_numeric(df[amount_col], errors="coerce"))
-               .groupby(cat_col)["_m"].sum().sort_values(ascending=False).head(5))
-        out["top_categorias"] = [{"nombre": str(k), "total": round(float(v), 2)} for k, v in top.items()]
+        by_cat = (df.assign(_m=pd.to_numeric(df[amount_col], errors="coerce"))
+                  .groupby(cat_col)["_m"].sum().sort_values(ascending=False))
+        out["top_categorias"] = [{"nombre": str(k), "total": round(float(v), 2)} for k, v in by_cat.head(5).items()]
+        if out.get("total"):
+            conc = float(by_cat.iloc[0]) / out["total"] * 100
+            out["concentracion_pct"] = round(conc, 1)
+            if conc >= 40:
+                alerts.append(f"'{by_cat.index[0]}' concentra el {conc:.0f}% de tus ventas. "
+                              "Si ese producto falla, tu negocio lo siente entero: diversifica o asegura su inventario.")
+
+    if seller_col and amount_col:
+        by_seller = (df.assign(_m=pd.to_numeric(df[amount_col], errors="coerce"))
+                     .groupby(seller_col)["_m"].sum().sort_values(ascending=False).head(5))
+        out["por_vendedor"] = [{"nombre": str(k), "total": round(float(v), 2)} for k, v in by_seller.items()]
+
     if date_col and amount_col:
         d = df.copy()
         d["_f"] = pd.to_datetime(d[date_col], errors="coerce", dayfirst=True)
@@ -126,7 +152,47 @@ def analyze(df):
             serie = d.groupby(d["_f"].dt.to_period("W"))["_m"].sum()
             out["serie_semanal"] = [{"semana": str(k), "total": round(float(v), 2)} for k, v in serie.tail(12).items()]
             if len(serie) >= 2 and float(serie.iloc[-2]) != 0:
-                out["variacion_pct"] = round((float(serie.iloc[-1]) / float(serie.iloc[-2]) - 1) * 100, 1)
+                var = (float(serie.iloc[-1]) / float(serie.iloc[-2]) - 1) * 100
+                out["variacion_pct"] = round(var, 1)
+                if var <= -15:
+                    alerts.append(f"Tus ventas cayeron {abs(var):.0f}% la última semana frente a la anterior. "
+                                  "Revisa qué cambió: inventario, días de apertura o competencia.")
+            # Ventas por día de la semana
+            dow = d.groupby(d["_f"].dt.dayofweek)["_m"].sum()
+            out["por_dia"] = [{"dia": DOW_NAMES[i], "total": round(float(dow.get(i, 0.0)), 2)} for i in range(7)]
+            dow_nz = dow[dow > 0]
+            if len(dow_nz) >= 3:
+                best_i, worst_i = int(dow_nz.idxmax()), int(dow_nz.idxmin())
+                out["mejor_dia"], out["peor_dia"] = DOW_NAMES[best_i], DOW_NAMES[worst_i]
+                if float(dow_nz.max()) > 0 and float(dow_nz.min()) / float(dow_nz.max()) < 0.4:
+                    alerts.append(f"El {DOW_NAMES[worst_i]} vendes menos de la mitad que el {DOW_NAMES[best_i]}. "
+                                  "Es tu mejor día para promociones, o para reducir horario y costos.")
+            # Serie mensual y crecimiento
+            monthly = d.groupby(d["_f"].dt.to_period("M"))["_m"].sum()
+            if len(monthly) >= 2:
+                out["serie_mensual"] = [{"mes": str(k), "total": round(float(v), 2)} for k, v in monthly.tail(6).items()]
+                if float(monthly.iloc[-2]) != 0:
+                    mg = (float(monthly.iloc[-1]) / float(monthly.iloc[-2]) - 1) * 100
+                    out["crecimiento_mensual_pct"] = round(mg, 1)
+            # Productos en caída: 2a mitad del período vs 1a mitad
+            if cat_col:
+                mid = d["_f"].min() + (d["_f"].max() - d["_f"].min()) / 2
+                first = d[d["_f"] <= mid].groupby(cat_col)["_m"].sum()
+                second = d[d["_f"] > mid].groupby(cat_col)["_m"].sum()
+                falling = []
+                for name in first.index:
+                    f1, f2 = float(first[name]), float(second.get(name, 0.0))
+                    if f1 > 0:
+                        chg = (f2 - f1) / f1 * 100
+                        if chg <= -25:
+                            falling.append({"nombre": str(name), "cambio_pct": round(chg, 1)})
+                falling.sort(key=lambda x: x["cambio_pct"])
+                if falling:
+                    out["productos_caida"] = falling[:5]
+                    worst = falling[0]
+                    alerts.append(f"'{worst['nombre']}' cayó {abs(worst['cambio_pct']):.0f}% en la segunda mitad del período. "
+                                  "Decide: ¿promoción para moverlo o dejar de reponerlo?")
+    out["alertas"] = alerts
     return out
 
 
@@ -196,13 +262,19 @@ def weekly_email_html(user, metrics, summary):
     sum_html = (f"<div style='background:#f0fdf7;border-left:3px solid #0e9f6e;border-radius:8px;"
                 f"padding:14px 18px;margin:18px 0;font-size:14px;white-space:pre-wrap'>{esc(summary)}</div>"
                 if summary else "")
+    alerts_html = "".join(
+        f"<div style='background:#fffbeb;border:1px solid #fde68a;border-radius:9px;"
+        f"padding:10px 14px;margin:8px 0;font-size:13px;color:#78350f'>⚠️ {esc(a)}</div>"
+        for a in metrics.get("alertas", []))
+    if alerts_html:
+        alerts_html = "<h3 style='margin:18px 0 4px;font-size:15px'>Atención esta semana</h3>" + alerts_html
     return f"""
     <div style="max-width:560px;margin:0 auto;font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#0e1b2c;padding:24px">
       <div style="font-weight:800;font-size:18px;margin-bottom:4px">Reporte<span style="color:#0e9f6e">Fácil</span></div>
       <h2 style="margin:8px 0 2px;font-size:20px">Tu resumen semanal, {esc(user['business'] or user['email'].split('@')[0])}</h2>
       <p style="color:#42526b;font-size:13px;margin:2px 0 18px">Basado en tu último reporte subido.</p>
       <table style="width:100%;border-collapse:collapse"><tr>{kpis}</tr></table>
-      {sum_html}{top}
+      {alerts_html}{sum_html}{top}
       <a href="{APP_URL}/dashboard" style="display:inline-block;margin-top:20px;background:#0e9f6e;color:#fff;
         font-weight:700;padding:11px 22px;border-radius:10px;text-decoration:none;font-size:14px">
         Subir ventas de esta semana</a>
@@ -903,6 +975,9 @@ LAYOUT = """<!doctype html>
   .kpi b { display:block; font-size:1.45rem; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
   .kpi span { font-size:.78rem; color:var(--ink2); font-weight:550; text-transform:uppercase; letter-spacing:.04em; }
   .kpi.up b { color:var(--accd); } .kpi.down b { color:var(--err); } .kpi.warnk b { color:var(--warn); }
+  .alerts { margin:14px 0; }
+  .alert { display:flex; gap:10px; align-items:flex-start; background:#fffbeb; border:1px solid #fde68a;
+    border-radius:11px; padding:12px 16px; margin:8px 0; font-size:.93rem; color:#78350f; }
   .sum { background:linear-gradient(135deg,#f0fdf7,#eff6ff); border:1px solid #d3e9de;
     border-radius:12px; padding:18px 20px; margin:14px 0; white-space:pre-wrap; font-size:.96rem; }
   .sum::before { content:"Resumen ejecutivo"; display:block; font-size:.72rem; font-weight:700;
@@ -996,40 +1071,81 @@ function renderReport(root, data) {
   h += '<div class="kpis">';
   if (m.total !== undefined) {
     h += kpiH(money(m.total),'ventas totales') + kpiH(m.transacciones,'transacciones')
-       + kpiH(money(m.promedio),'ticket promedio') + kpiH(money(m.maximo),'venta máxima');
+       + kpiH(money(m.promedio),'ticket promedio');
     if (m.variacion_pct !== undefined)
       h += kpiH((m.variacion_pct>0?'+':'')+m.variacion_pct+'%','vs semana anterior', m.variacion_pct>=0?'up':'down');
+    if (m.crecimiento_mensual_pct !== undefined)
+      h += kpiH((m.crecimiento_mensual_pct>0?'+':'')+m.crecimiento_mensual_pct+'%','crecimiento mensual', m.crecimiento_mensual_pct>=0?'up':'down');
+    if (m.mejor_dia) h += kpiH(m.mejor_dia,'tu mejor día');
+    if (m.concentracion_pct !== undefined)
+      h += kpiH(m.concentracion_pct+'%','ventas del producto #1', m.concentracion_pct>=40?'warnk':'');
   } else h += kpiH(m.filas,'filas leídas');
   h += '</div>';
+  if (m.alertas && m.alertas.length) {
+    h += '<div class="alerts">' + m.alertas.map(a =>
+      '<div class="alert">⚠️ <span>'+escH(a)+'</span></div>').join('') + '</div>';
+  }
   if (data.resumen) h += '<div class="sum">'+escH(data.resumen)+'</div>';
   const hasSerie = m.serie_semanal && m.serie_semanal.length > 1;
   const hasTop = m.top_categorias && m.top_categorias.length;
-  if (hasSerie || hasTop) {
+  const hasDow = m.por_dia && m.por_dia.some(x=>x.total>0);
+  const hasMes = m.serie_mensual && m.serie_mensual.length > 1;
+  if (hasSerie || hasTop || hasDow || hasMes) {
     h += '<div class="charts">';
     if (hasSerie) h += '<div class="chartbox"><h4>Ventas por semana</h4><canvas id="c-serie" height="220"></canvas></div>';
     if (hasTop) h += '<div class="chartbox"><h4>Top ' + escH(String(m.col_categoria||'categorías')) + '</h4><canvas id="c-top" height="220"></canvas></div>';
+    if (hasDow) h += '<div class="chartbox"><h4>¿Qué días vendes más?</h4><canvas id="c-dow" height="220"></canvas></div>';
+    if (hasMes) h += '<div class="chartbox"><h4>Evolución mensual</h4><canvas id="c-mes" height="220"></canvas></div>';
     h += '</div>';
+  }
+  if (m.productos_caida && m.productos_caida.length) {
+    h += '<h3 style="margin:18px 0 6px;font-size:1rem">Productos en caída <span class="muted sm">(2ª mitad del período vs 1ª)</span></h3>'
+      + '<table><tr><th>' + escH(String(m.col_categoria||'Producto')) + '</th><th class="num">Cambio</th></tr>'
+      + m.productos_caida.map(p => '<tr><td>'+escH(p.nombre)+'</td><td class="num" style="color:#b91c1c">'+p.cambio_pct+'%</td></tr>').join('')
+      + '</table>';
+  }
+  if (m.por_vendedor && m.por_vendedor.length) {
+    h += '<h3 style="margin:18px 0 6px;font-size:1rem">Ventas por ' + escH(String(m.col_vendedor)) + '</h3>'
+      + '<table><tr><th>' + escH(String(m.col_vendedor)) + '</th><th class="num">Total</th></tr>'
+      + m.por_vendedor.map(p => '<tr><td>'+escH(p.nombre)+'</td><td class="num">'+money(p.total)+'</td></tr>').join('')
+      + '</table>';
   }
   if (!m.col_monto) h += '<p class="muted">No detecté una columna de montos. Nombra una columna "total", "monto" o "venta" para el análisis completo.</p>';
   root.innerHTML = h;
   if (typeof Chart === 'undefined') return;
   Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
   Chart.defaults.color = '#42526b';
+  const noLegend = { plugins:{legend:{display:false}} };
+  const yMoney = { ticks:{ callback:v=>money(v) }, grid:{color:'#eef2f7'} };
   if (hasSerie) {
     new Chart(document.getElementById('c-serie'), { type:'line',
       data:{ labels:m.serie_semanal.map(x=>x.semana.split('/')[0]),
         datasets:[{ data:m.serie_semanal.map(x=>x.total), borderColor:'#0e9f6e',
           backgroundColor:'rgba(14,159,110,.09)', fill:true, tension:.35, pointRadius:3,
           pointBackgroundColor:'#0e9f6e', borderWidth:2.5 }]},
-      options:{ plugins:{legend:{display:false}}, scales:{ y:{ ticks:{ callback:v=>money(v) }, grid:{color:'#eef2f7'} }, x:{ grid:{display:false} } } } });
+      options:{ ...noLegend, scales:{ y:yMoney, x:{ grid:{display:false} } } } });
   }
   if (hasTop) {
     new Chart(document.getElementById('c-top'), { type:'bar',
       data:{ labels:m.top_categorias.map(x=>x.nombre),
         datasets:[{ data:m.top_categorias.map(x=>x.total),
           backgroundColor:['#0e9f6e','#2563eb','#7c3aed','#d97706','#64748b'], borderRadius:8 }]},
-      options:{ indexAxis:'y', plugins:{legend:{display:false}},
-        scales:{ x:{ ticks:{ callback:v=>money(v) }, grid:{color:'#eef2f7'} }, y:{ grid:{display:false} } } } });
+      options:{ indexAxis:'y', ...noLegend,
+        scales:{ x:yMoney, y:{ grid:{display:false} } } } });
+  }
+  if (hasDow) {
+    const best = Math.max(...m.por_dia.map(x=>x.total));
+    new Chart(document.getElementById('c-dow'), { type:'bar',
+      data:{ labels:m.por_dia.map(x=>x.dia.slice(0,3)),
+        datasets:[{ data:m.por_dia.map(x=>x.total), borderRadius:8,
+          backgroundColor:m.por_dia.map(x=>x.total===best?'#0e9f6e':'#c7d2e0') }]},
+      options:{ ...noLegend, scales:{ y:yMoney, x:{ grid:{display:false} } } } });
+  }
+  if (hasMes) {
+    new Chart(document.getElementById('c-mes'), { type:'bar',
+      data:{ labels:m.serie_mensual.map(x=>x.mes),
+        datasets:[{ data:m.serie_mensual.map(x=>x.total), backgroundColor:'#2563eb', borderRadius:8 }]},
+      options:{ ...noLegend, scales:{ y:yMoney, x:{ grid:{display:false} } } } });
   }
 }
 </script>
@@ -1082,6 +1198,21 @@ LANDING_BODY = """
       Arrastra tu archivo aquí <span style="font-weight:400">o haz click para elegirlo</span></div>
     <input type="file" id="file" accept=".csv,.xlsx,.xls" style="display:none" onchange="up(this.files[0])">
     <div id="result"></div>
+  </div>
+
+  <div class="bigsection"><h2>Lo que los grandes ya saben.</h2>
+    <p>Las cadenas grandes deciden con dashboards; la mayoría de negocios pequeños todavía no.
+    Esa brecha es tu oportunidad.</p></div>
+  <div class="trustgrid">
+    <div class="trustcard"><span class="ic">📊</span><b>La mayoría de PYMEs aún no usa IA ni analítica</b>
+      <span>La adopción sigue siendo baja en negocios pequeños — quien la usa primero, decide mejor que su competencia.
+      <a href="https://www.pipedrive.com/en/blog/small-business-stats" target="_blank" rel="noopener">Fuente: Pipedrive, Small Business Stats</a></span></div>
+    <div class="trustcard"><span class="ic">📈</span><b>El retail crece apenas ~1.6% anual</b>
+      <span>En el sector de crecimiento más lento, cada punto de margen y cada producto estancado cuentan el doble.
+      <a href="https://votednumberone.com/small-business-revenue-by-industry-2026-report/" target="_blank" rel="noopener">Fuente: Small Business Revenue Report 2026</a></span></div>
+    <div class="trustcard"><span class="ic">🎯</span><b>Los reportes que usa una cadena, para tu tienda</b>
+      <span>Ventas por día, crecimiento mensual, productos en caída, desglose por vendedor — el mismo tipo de análisis
+      de las plataformas líderes de retail, desde tu Excel.</span></div>
   </div>
 
   <div class="bigsection"><h2>Tres pasos. Cero configuración.</h2>
@@ -1168,18 +1299,26 @@ window.addEventListener('load', () => {
   if (!mock) return;
   renderReport(mock, {
     metrics: {
-      filas: 300, col_monto: 'Total', col_categoria: 'Producto',
-      total: 18557.06, transacciones: 300, promedio: 61.86, maximo: 119.86, variacion_pct: 12.4,
+      filas: 300, col_monto: 'Total', col_categoria: 'Producto', col_vendedor: 'Vendedor',
+      total: 18557.06, transacciones: 300, promedio: 61.86, variacion_pct: 12.4,
+      crecimiento_mensual_pct: 8.2, mejor_dia: 'Sábado', concentracion_pct: 25.3,
+      alertas: ["'Chompa' cayó 31% en la segunda mitad del período. Decide: ¿promoción para moverlo o dejar de reponerlo?"],
       serie_semanal: [
         {semana:'S1', total:1350},{semana:'S2', total:1520},{semana:'S3', total:1410},
         {semana:'S4', total:1680},{semana:'S5', total:1590},{semana:'S6', total:1740},
         {semana:'S7', total:1620},{semana:'S8', total:1890},{semana:'S9', total:1760},
         {semana:'S10', total:1950},{semana:'S11', total:1830},{semana:'S12', total:2055}],
+      por_dia: [
+        {dia:'Lunes', total:1890},{dia:'Martes', total:2100},{dia:'Miércoles', total:2350},
+        {dia:'Jueves', total:2600},{dia:'Viernes', total:3200},{dia:'Sábado', total:4100},{dia:'Domingo', total:2317}],
+      serie_mensual: [
+        {mes:'2026-05', total:5600},{mes:'2026-06', total:6100},{mes:'2026-07', total:6857}],
       top_categorias: [
         {nombre:'Zapatos', total:4690.9},{nombre:'Camiseta', total:4357.38},
-        {nombre:'Pantalón', total:3538.94},{nombre:'Gorra', total:3277.42},{nombre:'Chompa', total:2692.42}]
+        {nombre:'Pantalón', total:3538.94},{nombre:'Gorra', total:3277.42},{nombre:'Chompa', total:2692.42}],
+      productos_caida: [{nombre:'Chompa', cambio_pct:-31.2}]
     },
-    resumen: 'Buen cierre de mes: las ventas crecieron 12,4% frente a la semana anterior y el ticket promedio se mantiene estable. Zapatos concentra la mayor facturación; Chompa viene rezagada. Recomendación de la semana: asegura inventario de tus 2 productos top antes del fin de semana, que es cuando más rotan.'
+    resumen: 'Buen cierre: creces 8,2% mensual y el sábado es tu motor — concentra ahí tu mejor inventario y personal. Chompa lleva un mes cayendo: o la mueves con promoción esta semana o libera ese capital. El ticket promedio se mantiene estable, señal de que el crecimiento viene por más clientes, no por compras más grandes.'
   });
   mock.insertAdjacentHTML('beforeend',
     '<p class="muted sm" style="margin-top:10px">Ejemplo con datos ficticios. Abajo puedes generarlo con tus datos reales.</p>');

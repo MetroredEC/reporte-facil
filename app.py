@@ -1,16 +1,7 @@
 """
-ReporteFácil v2 — Portal de autogestión de clientes
-Landing pública + demo, registro/login, dashboard con historial de reportes,
-plan con pago por link (activación manual), soporte por tickets, panel admin.
-
-Variables de entorno (.env):
-  ANTHROPIC_API_KEY  opcional — resumen ejecutivo con IA
-  SECRET_KEY         recomendado en producción (firma de sesiones)
-  ADMIN_PASSWORD     obligatorio para entrar a /admin (default: cambiame)
-  PAYMENT_LINK       tu link de pago (PayPal.me, Payphone, etc.)
-  PLAN_PRICE         precio mostrado (default: $29/mes)
-
-Uso local:  python app.py  ->  http://localhost:8090
+ReporteFácil v3 — Portal de autogestión de clientes (UI premium)
+Backend idéntico a v2 (probado). Capa visual rediseñada: landing SaaS moderna,
+gráficas Chart.js en reportes, design system consistente.
 """
 import io
 import json
@@ -40,6 +31,8 @@ PLAN_PRICE = os.getenv("PLAN_PRICE", "$29/mes")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "portal.db")
 
+STATUSES = ["borrador", "enviada", "respondio", "ganada", "perdida"]
+
 
 # ------------------------------- base de datos ------------------------------
 def db():
@@ -57,7 +50,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL,
         pw_hash TEXT NOT NULL, business TEXT DEFAULT '',
-        plan_status TEXT NOT NULL DEFAULT 'free',  -- free | pending | active
+        plan_status TEXT NOT NULL DEFAULT 'free',
         created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
@@ -69,8 +62,7 @@ def init_db():
         created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS ticket_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL,
-        sender TEXT NOT NULL,  -- cliente | soporte
-        body TEXT NOT NULL, created_at TEXT NOT NULL);
+        sender TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL);
     """)
     con.commit()
     con.close()
@@ -185,18 +177,35 @@ def current_user():
     return u
 
 
+def esc(s):
+    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
 def page(content, title="ReporteFácil"):
     return render_template_string(
         LAYOUT.replace("__CONTENT__", content).replace("__TITLE__", title))
+
+
+def kpi(v, label, accent=""):
+    return f"<div class='kpi {accent}'><b>{v}</b><span>{label}</span></div>"
+
+
+def err_box(msg):
+    return f"<div class='card errbox'>{msg}</div>"
+
+
+def back_link(href, txt="Volver"):
+    return f"<a class='back' href='{href}'>&larr; {txt}</a>"
 
 
 # ------------------------------ rutas públicas ------------------------------
 @app.route("/")
 def landing():
     logged = bool(session.get("uid"))
-    return page(LANDING_BODY.replace("__NAV__",
-        '<a class="btn" href="/dashboard">Mi panel</a>' if logged
-        else '<a class="btn ghost" href="/login">Entrar</a> <a class="btn" href="/registro">Crear cuenta</a>'))
+    nav = ('<a class="btn" href="/dashboard">Mi panel</a>' if logged else
+           '<a class="navlink" href="/login">Entrar</a><a class="btn" href="/registro">Crear cuenta gratis</a>')
+    return page(LANDING_BODY.replace("__NAV__", nav), "ReporteFácil — Tus ventas, explicadas cada lunes")
 
 
 @app.route("/subscribe", methods=["POST"])
@@ -234,7 +243,7 @@ def report_demo():
 @app.route("/registro", methods=["GET", "POST"])
 def register():
     if request.method == "GET":
-        return page(AUTH_FORM.replace("__MODE__", "registro"), "Crear cuenta")
+        return page(AUTH_FORM.replace("__MODE__", "registro"), "Crear cuenta — ReporteFácil")
     email = (request.form.get("email") or "").strip().lower()
     pw = request.form.get("password") or ""
     business = (request.form.get("business") or "").strip()
@@ -258,7 +267,7 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
     if request.method == "GET":
-        return page(AUTH_FORM.replace("__MODE__", "login"), "Entrar")
+        return page(AUTH_FORM.replace("__MODE__", "login"), "Entrar — ReporteFácil")
     email = (request.form.get("email") or "").strip().lower()
     pw = request.form.get("password") or ""
     con = db()
@@ -278,6 +287,20 @@ def logout():
 
 
 # ------------------------------- portal cliente -----------------------------
+def portal_nav(u, active=""):
+    open_tickets = ""
+    return f"""
+    <div class="topbar">
+      <a class="brand" href="/">Reporte<span>Fácil</span></a>
+      <nav class="tabs">
+        <a href="/dashboard" class="{'on' if active == 'dash' else ''}">Panel</a>
+        <a href="/plan" class="{'on' if active == 'plan' else ''}">Mi plan</a>
+        <a href="/soporte" class="{'on' if active == 'sup' else ''}">Soporte</a>
+        <a href="/logout">Salir</a>
+      </nav>
+    </div>"""
+
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
@@ -286,30 +309,36 @@ def dashboard():
     reports = con.execute(
         "SELECT id, filename, created_at, metrics FROM reports WHERE user_id=? ORDER BY id DESC LIMIT 50",
         (u["id"],)).fetchall()
-    open_tickets = con.execute(
-        "SELECT COUNT(*) n FROM tickets WHERE user_id=? AND status='abierto'", (u["id"],)).fetchone()["n"]
     con.close()
     rows = "".join(
-        f"<tr><td>#{r['id']}</td><td>{esc(r['filename'])}</td>"
+        f"<tr><td><span class='chip'>#{r['id']}</span></td><td>{esc(r['filename'])}</td>"
         f"<td>{r['created_at'][:10]}</td>"
-        f"<td>${json.loads(r['metrics']).get('total', '—')}</td>"
-        f"<td><a href='/reporte/{r['id']}'>ver</a></td></tr>" for r in reports)
-    plan_badge = {"free": "Gratis", "pending": "Pago en verificación", "active": "Activo ✓"}[u["plan_status"]]
+        f"<td class='num'>${json.loads(r['metrics']).get('total', '—'):,}</td>"
+        f"<td><a class='btn sm ghost' href='/reporte/{r['id']}'>Ver reporte</a></td></tr>"
+        if json.loads(r['metrics']).get('total') is not None else
+        f"<tr><td><span class='chip'>#{r['id']}</span></td><td>{esc(r['filename'])}</td>"
+        f"<td>{r['created_at'][:10]}</td><td class='num'>—</td>"
+        f"<td><a class='btn sm ghost' href='/reporte/{r['id']}'>Ver reporte</a></td></tr>"
+        for r in reports)
+    badge = {"free": "<span class='badge'>Plan Gratis</span>",
+             "pending": "<span class='badge warn'>Pago en verificación</span>",
+             "active": "<span class='badge ok'>Plan Pro ✓</span>"}[u["plan_status"]]
     body = f"""
-    <div class="topbar"><h2>Hola, {esc(u['business'] or u['email'])}</h2>
-      <div><span class="badge">{plan_badge}</span>
-      <a class="btn ghost" href="/plan">Mi plan</a>
-      <a class="btn ghost" href="/soporte">Soporte{f' ({open_tickets})' if open_tickets else ''}</a>
-      <a class="btn ghost" href="/logout">Salir</a></div></div>
-    <div class="card"><h3>Nuevo reporte</h3>
-      <div class="note">Sube tu .csv o .xlsx de ventas. El reporte se guarda en tu historial.</div>
+    {portal_nav(u, 'dash')}
+    <div class="pagehead"><h1>Hola, {esc(u['business'] or u['email'].split('@')[0])}</h1>{badge}</div>
+    <div class="card">
+      <h3>Nuevo reporte</h3>
+      <p class="muted">Sube tu archivo de ventas (.csv o .xlsx). El reporte se genera al instante y queda en tu historial.</p>
       <form action="/reporte" method="post" enctype="multipart/form-data" class="row">
         <input type="file" name="file" accept=".csv,.xlsx,.xls" required>
-        <button>Generar y guardar</button></form></div>
-    <div class="card"><h3>Historial</h3>
-      {'<table><tr><th>#</th><th>Archivo</th><th>Fecha</th><th>Ventas</th><th></th></tr>' + rows + '</table>' if rows else '<div class="note">Aún no tienes reportes.</div>'}
+        <button class="btn">Generar reporte</button>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Historial</h3>
+      {'<table><tr><th></th><th>Archivo</th><th>Fecha</th><th class="num">Ventas</th><th></th></tr>' + rows + '</table>' if rows else '<p class="muted">Aún no tienes reportes. Sube tu primer archivo arriba.</p>'}
     </div>"""
-    return page(body, "Mi panel")
+    return page(body, "Mi panel — ReporteFácil")
 
 
 @app.route("/reporte", methods=["POST"])
@@ -318,14 +347,14 @@ def create_report():
     u = current_user()
     f = request.files.get("file")
     if not f or not f.filename:
-        return page(err_box("Sube un archivo.") + back_link("/dashboard"))
+        return page(portal_nav(u, 'dash') + err_box("Sube un archivo.") + back_link("/dashboard"))
     try:
         df = parse_upload(f)
         if df.empty:
             raise ValueError("El archivo está vacío.")
         m = analyze(df)
     except Exception as e:  # noqa: BLE001
-        return page(err_box(f"No pude procesar el archivo: {esc(str(e))}") + back_link("/dashboard"))
+        return page(portal_nav(u, 'dash') + err_box(f"No pude procesar el archivo: {esc(str(e))}") + back_link("/dashboard"))
     s = ai_summary(m)
     con = db()
     cur = con.execute("INSERT INTO reports (user_id, filename, metrics, summary, created_at) VALUES (?,?,?,?,?)",
@@ -344,27 +373,18 @@ def view_report(rid):
     r = con.execute("SELECT * FROM reports WHERE id=? AND user_id=?", (rid, u["id"])).fetchone()
     con.close()
     if not r:
-        return page(err_box("Reporte no encontrado.") + back_link("/dashboard"))
+        return page(portal_nav(u, 'dash') + err_box("Reporte no encontrado.") + back_link("/dashboard"))
     m = json.loads(r["metrics"])
-    kpis = ""
-    if m.get("total") is not None:
-        kpis += kpi(f"${m['total']:,}", "ventas totales") + kpi(m.get("transacciones", "—"), "transacciones")
-        kpis += kpi(f"${m.get('promedio', 0):,}", "ticket promedio") + kpi(f"${m.get('maximo', 0):,}", "venta máxima")
-        if m.get("variacion_pct") is not None:
-            kpis += kpi(f"{m['variacion_pct']}%", "vs semana anterior")
-    top = ""
-    if m.get("top_categorias"):
-        top = ("<table><tr><th>" + esc(str(m.get("col_categoria"))) + "</th><th>Total</th></tr>"
-               + "".join(f"<tr><td>{esc(t['nombre'])}</td><td>${t['total']:,}</td></tr>" for t in m["top_categorias"])
-               + "</table>")
     body = f"""
-    {back_link('/dashboard')}
-    <div class="card"><h3>Reporte #{r['id']} — {esc(r['filename'])}</h3>
-      <div class="note">{r['created_at'][:16].replace('T', ' ')} UTC</div>
-      <div class="kpis">{kpis or kpi(m['filas'], 'filas leídas')}</div>
-      {('<div class="sum">' + esc(r['summary']) + '</div>') if r['summary'] else ''}
-      {top}</div>"""
-    return page(body, f"Reporte #{r['id']}")
+    {portal_nav(u, 'dash')}
+    {back_link('/dashboard', 'Volver al panel')}
+    <div class="pagehead"><h1>{esc(r['filename'])}</h1>
+      <span class="muted">{r['created_at'][:16].replace('T', ' ')} UTC</span></div>
+    <div id="report-root" class="reportview"></div>
+    <script>window.__REPORT__ = {{ metrics: {json.dumps(m, ensure_ascii=False)},
+      resumen: {json.dumps(r['summary'], ensure_ascii=False)} }};</script>
+    <script>renderReport(document.getElementById('report-root'), window.__REPORT__);</script>"""
+    return page(body, f"Reporte — {esc(r['filename'])}")
 
 
 @app.route("/plan")
@@ -372,19 +392,30 @@ def view_report(rid):
 def plan():
     u = current_user()
     status = u["plan_status"]
-    pay = (f'<a class="btn" href="{esc(PAYMENT_LINK)}" target="_blank">Pagar {esc(PLAN_PRICE)}</a>'
-           if PAYMENT_LINK else '<div class="note">El administrador aún no configuró el link de pago (variable PAYMENT_LINK).</div>')
+    pay = (f'<a class="btn" href="{esc(PAYMENT_LINK)}" target="_blank" rel="noopener">Pagar {esc(PLAN_PRICE)}</a>'
+           if PAYMENT_LINK else '<p class="muted">El link de pago estará disponible muy pronto. Escríbenos por soporte si quieres activar Pro hoy.</p>')
     blocks = {
-        "free": f"""<p>Estás en el plan <b>gratuito</b> (reportes manuales ilimitados).</p>
-            <p>El plan <b>Pro ({esc(PLAN_PRICE)})</b> incluye: reporte automático cada lunes en tu correo,
-            resumen ejecutivo con IA y soporte prioritario.</p>
+        "free": f"""
+        <div class="plans">
+          <div class="plancard">
+            <h3>Gratis</h3><div class="price">$0</div>
+            <ul><li>Reportes manuales ilimitados</li><li>KPIs y gráficas</li><li>Historial de reportes</li></ul>
+            <span class="badge ok">Tu plan actual</span>
+          </div>
+          <div class="plancard pro">
+            <div class="ribbon">Recomendado</div>
+            <h3>Pro</h3><div class="price">{esc(PLAN_PRICE)}</div>
+            <ul><li>Reporte automático cada lunes en tu correo</li><li>Resumen ejecutivo con IA</li><li>Soporte prioritario</li></ul>
             <div class="row">{pay}
-            <form action="/plan/ya-pague" method="post"><button class="ghost">Ya pagué — verificar</button></form></div>
-            <div class="note">Tras pagar, haz click en "Ya pagué". Activamos tu cuenta en menos de 24 h.</div>""",
-        "pending": "<p>Tu pago está <b>en verificación</b>. Activamos tu plan en menos de 24 h. Si tarda más, abre un ticket de soporte.</p>",
-        "active": "<p>Plan <b>Pro activo</b> ✓ — gracias. Tu reporte automático llega cada lunes.</p>",
+            <form action="/plan/ya-pague" method="post"><button class="btn ghost">Ya pagué — verificar</button></form></div>
+            <p class="muted sm">Tras pagar, pulsa "Ya pagué". Activamos tu cuenta en menos de 24 h.</p>
+          </div>
+        </div>""",
+        "pending": "<div class='card'><h3>Pago en verificación</h3><p>Activamos tu plan Pro en menos de 24 horas. Si tarda más, abre un ticket de soporte y lo resolvemos.</p></div>",
+        "active": "<div class='card'><h3>Plan Pro activo ✓</h3><p>Gracias por confiar en ReporteFácil. Tu reporte automático llega cada lunes.</p></div>",
     }
-    return page(back_link("/dashboard") + f'<div class="card"><h3>Mi plan</h3>{blocks[status]}</div>', "Mi plan")
+    return page(portal_nav(u, 'plan') + "<div class='pagehead'><h1>Mi plan</h1></div>" + blocks[status],
+                "Mi plan — ReporteFácil")
 
 
 @app.route("/plan/ya-pague", methods=["POST"])
@@ -417,18 +448,26 @@ def support():
     tickets = con.execute("SELECT * FROM tickets WHERE user_id=? ORDER BY id DESC", (u["id"],)).fetchall()
     con.close()
     rows = "".join(
-        f"<tr><td>#{t['id']}</td><td><a href='/soporte/{t['id']}'>{esc(t['subject'])}</a></td>"
-        f"<td>{t['status']}</td><td>{t['created_at'][:10]}</td></tr>" for t in tickets)
+        f"<tr><td><span class='chip'>#{t['id']}</span></td>"
+        f"<td><a href='/soporte/{t['id']}'>{esc(t['subject'])}</a></td>"
+        f"<td><span class='badge {'ok' if t['status'] == 'cerrado' else 'warn'}'>{t['status']}</span></td>"
+        f"<td>{t['created_at'][:10]}</td></tr>" for t in tickets)
     body = f"""
-    {back_link('/dashboard')}
-    <div class="card"><h3>Nuevo ticket</h3>
+    {portal_nav(u, 'sup')}
+    <div class="pagehead"><h1>Soporte</h1><span class="muted">Respondemos en menos de 24 h</span></div>
+    <div class="card">
+      <h3>Nuevo ticket</h3>
       <form method="post">
-        <input type="text" name="subject" placeholder="Asunto" required style="width:100%;margin-bottom:8px">
-        <textarea name="body" placeholder="Describe tu problema o pregunta..." required></textarea>
-        <div class="row"><button>Enviar</button></div></form></div>
-    <div class="card"><h3>Mis tickets</h3>
-      {'<table><tr><th>#</th><th>Asunto</th><th>Estado</th><th>Fecha</th></tr>' + rows + '</table>' if rows else '<div class="note">Sin tickets.</div>'}</div>"""
-    return page(body, "Soporte")
+        <input type="text" name="subject" placeholder="Asunto" required class="full">
+        <textarea name="body" placeholder="Cuéntanos tu problema o pregunta con detalle..." required></textarea>
+        <div class="row"><button class="btn">Enviar ticket</button></div>
+      </form>
+    </div>
+    <div class="card">
+      <h3>Mis tickets</h3>
+      {'<table><tr><th></th><th>Asunto</th><th>Estado</th><th>Fecha</th></tr>' + rows + '</table>' if rows else '<p class="muted">Sin tickets todavía.</p>'}
+    </div>"""
+    return page(body, "Soporte — ReporteFácil")
 
 
 @app.route("/soporte/<int:tid>", methods=["GET", "POST"])
@@ -439,7 +478,7 @@ def support_thread(tid):
     t = con.execute("SELECT * FROM tickets WHERE id=? AND user_id=?", (tid, u["id"])).fetchone()
     if not t:
         con.close()
-        return page(err_box("Ticket no encontrado.") + back_link("/soporte"))
+        return page(portal_nav(u, 'sup') + err_box("Ticket no encontrado.") + back_link("/soporte"))
     if request.method == "POST":
         body = (request.form.get("body") or "").strip()
         if body:
@@ -452,16 +491,20 @@ def support_thread(tid):
     msgs = con.execute("SELECT * FROM ticket_messages WHERE ticket_id=? ORDER BY id", (tid,)).fetchall()
     con.close()
     thread = "".join(
-        f"<div class='msg {m['sender']}'><b>{'Tú' if m['sender'] == 'cliente' else 'Soporte'}</b>"
-        f"<span class='note'> · {m['created_at'][:16].replace('T', ' ')}</span><br>{esc(m['body'])}</div>" for m in msgs)
+        f"<div class='msg {m['sender']}'><div class='msghead'>{'Tú' if m['sender'] == 'cliente' else 'Soporte ReporteFácil'}"
+        f"<span> · {m['created_at'][:16].replace('T', ' ')}</span></div>{esc(m['body'])}</div>" for m in msgs)
     body = f"""
-    {back_link('/soporte')}
-    <div class="card"><h3>#{t['id']} — {esc(t['subject'])} <span class="badge">{t['status']}</span></h3>
-      {thread}
-      <form method="post" style="margin-top:12px">
-        <textarea name="body" placeholder="Responder..." required></textarea>
-        <div class="row"><button>Responder</button></div></form></div>"""
-    return page(body, f"Ticket #{t['id']}")
+    {portal_nav(u, 'sup')}
+    {back_link('/soporte', 'Volver a soporte')}
+    <div class="pagehead"><h1>{esc(t['subject'])}</h1>
+      <span class="badge {'ok' if t['status'] == 'cerrado' else 'warn'}">{t['status']}</span></div>
+    <div class="card">{thread}
+      <form method="post" class="replyform">
+        <textarea name="body" placeholder="Escribe tu respuesta..." required></textarea>
+        <div class="row"><button class="btn">Responder</button></div>
+      </form>
+    </div>"""
+    return page(body, f"Ticket #{t['id']} — ReporteFácil")
 
 
 # ---------------------------------- admin -----------------------------------
@@ -472,7 +515,7 @@ def admin_login():
             session["admin"] = True
             return redirect("/admin")
         return page(err_box("Contraseña incorrecta.") + ADMIN_LOGIN_FORM, "Admin")
-    return page(ADMIN_LOGIN_FORM, "Admin")
+    return page(ADMIN_LOGIN_FORM, "Admin — ReporteFácil")
 
 
 @app.route("/admin")
@@ -487,24 +530,38 @@ def admin():
            WHERE t.status='abierto' ORDER BY t.id DESC""").fetchall()
     leads_rows = con.execute("SELECT * FROM leads ORDER BY id DESC LIMIT 100").fetchall()
     con.close()
-    urows = "".join(
-        f"<tr><td>{u['id']}</td><td>{esc(u['email'])}</td><td>{esc(u['business'])}</td><td>{u['plan_status']}</td>"
-        f"<td>{'<form method=post action=/admin/activar/' + str(u['id']) + '><button class=mini>Activar Pro</button></form>' if u['plan_status'] != 'active' else '✓'}</td></tr>"
-        for u in users)
+    urows_list = []
+    for u in users:
+        badge_cls = "ok" if u["plan_status"] == "active" else ("warn" if u["plan_status"] == "pending" else "")
+        if u["plan_status"] != "active":
+            action = ("<form method='post' action='/admin/activar/" + str(u["id"])
+                      + "'><button class='btn sm'>Activar Pro</button></form>")
+        else:
+            action = "✓"
+        urows_list.append(
+            f"<tr><td><span class='chip'>{u['id']}</span></td><td>{esc(u['email'])}</td>"
+            f"<td>{esc(u['business'])}</td>"
+            f"<td><span class='badge {badge_cls}'>{u['plan_status']}</span></td>"
+            f"<td>{action}</td></tr>")
+    urows = "".join(urows_list)
     trows = "".join(
-        f"<tr><td>#{t['id']}</td><td>{esc(t['email'])}</td><td><a href='/admin/ticket/{t['id']}'>{esc(t['subject'])}</a></td>"
+        f"<tr><td><span class='chip'>#{t['id']}</span></td><td>{esc(t['email'])}</td>"
+        f"<td><a href='/admin/ticket/{t['id']}'>{esc(t['subject'])}</a></td>"
         f"<td>{t['created_at'][:10]}</td></tr>" for t in tickets)
     lrows = "".join(f"<tr><td>{esc(x['email'])}</td><td>{x['created_at'][:10]}</td></tr>" for x in leads_rows)
     body = f"""
-    <div class="topbar"><h2>Admin</h2><a class="btn ghost" href="/logout">Salir</a></div>
-    <div class="kpis">{kpi(nleads, 'leads')}{kpi(len(users), 'usuarios')}{kpi(len(pending), 'pagos por verificar')}{kpi(len(trows and tickets), 'tickets abiertos')}</div>
-    <div class="card"><h3>Usuarios {'— ⚠ hay pagos por verificar' if pending else ''}</h3>
-      <table><tr><th>ID</th><th>Correo</th><th>Negocio</th><th>Plan</th><th></th></tr>{urows}</table></div>
+    <div class="topbar"><a class="brand" href="/">Reporte<span>Fácil</span> <em>admin</em></a>
+      <nav class="tabs"><a href="/logout">Salir</a></nav></div>
+    <div class="pagehead"><h1>Administración</h1></div>
+    <div class="kpis">{kpi(nleads, 'leads captados')}{kpi(len(users), 'usuarios')}{kpi(len(pending), 'pagos por verificar', 'warnk' if pending else '')}{kpi(len(tickets), 'tickets abiertos', 'warnk' if tickets else '')}</div>
+    <div class="card"><h3>Usuarios</h3>
+      <table><tr><th></th><th>Correo</th><th>Negocio</th><th>Plan</th><th></th></tr>{urows or ''}</table>
+      {'' if urows else '<p class="muted">Sin usuarios aún.</p>'}</div>
     <div class="card"><h3>Tickets abiertos</h3>
-      {'<table><tr><th>#</th><th>Cliente</th><th>Asunto</th><th>Fecha</th></tr>' + trows + '</table>' if trows else '<div class="note">Ninguno.</div>'}</div>
+      {'<table><tr><th></th><th>Cliente</th><th>Asunto</th><th>Fecha</th></tr>' + trows + '</table>' if trows else '<p class="muted">Ninguno.</p>'}</div>
     <div class="card"><h3>Leads de la landing</h3>
-      {'<table><tr><th>Correo</th><th>Fecha</th></tr>' + lrows + '</table>' if lrows else '<div class="note">Ninguno.</div>'}</div>"""
-    return page(body, "Admin")
+      {'<table><tr><th>Correo</th><th>Fecha</th></tr>' + lrows + '</table>' if lrows else '<p class="muted">Ninguno todavía.</p>'}</div>"""
+    return page(body, "Admin — ReporteFácil")
 
 
 @app.route("/admin/activar/<int:uid>", methods=["POST"])
@@ -540,106 +597,255 @@ def admin_ticket(tid):
     msgs = con.execute("SELECT * FROM ticket_messages WHERE ticket_id=? ORDER BY id", (tid,)).fetchall()
     con.close()
     thread = "".join(
-        f"<div class='msg {m['sender']}'><b>{'Cliente' if m['sender'] == 'cliente' else 'Tú (soporte)'}</b>"
-        f"<span class='note'> · {m['created_at'][:16].replace('T', ' ')}</span><br>{esc(m['body'])}</div>" for m in msgs)
+        f"<div class='msg {m['sender']}'><div class='msghead'>{'Cliente' if m['sender'] == 'cliente' else 'Tú (soporte)'}"
+        f"<span> · {m['created_at'][:16].replace('T', ' ')}</span></div>{esc(m['body'])}</div>" for m in msgs)
     body = f"""
-    {back_link('/admin')}
-    <div class="card"><h3>#{t['id']} — {esc(t['subject'])} <span class="badge">{t['status']}</span></h3>
-      <div class="note">Cliente: {esc(t['email'])}</div>
-      {thread}
-      <form method="post" style="margin-top:12px">
+    <div class="topbar"><a class="brand" href="/admin">Reporte<span>Fácil</span> <em>admin</em></a>
+      <nav class="tabs"><a href="/logout">Salir</a></nav></div>
+    {back_link('/admin', 'Volver a admin')}
+    <div class="pagehead"><h1>{esc(t['subject'])}</h1>
+      <span class="muted">Cliente: {esc(t['email'])}</span>
+      <span class="badge {'ok' if t['status'] == 'cerrado' else 'warn'}">{t['status']}</span></div>
+    <div class="card">{thread}
+      <form method="post" class="replyform">
         <textarea name="body" placeholder="Respuesta al cliente..."></textarea>
-        <div class="row"><button name="action" value="responder">Responder</button>
-        <button name="action" value="cerrar" class="ghost">Responder y cerrar</button></div></form></div>"""
+        <div class="row"><button class="btn" name="action" value="responder">Responder</button>
+        <button class="btn ghost" name="action" value="cerrar">Responder y cerrar</button></div>
+      </form>
+    </div>"""
     return page(body, f"Admin · Ticket #{t['id']}")
 
 
-# ----------------------------- html / helpers -------------------------------
-def esc(s):
-    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;"))
-
-
-def kpi(v, label):
-    return f"<div class='kpi'><b>{v}</b><span>{label}</span></div>"
-
-
-def err_box(msg):
-    return f"<div class='card err'>{msg}</div>"
-
-
-def back_link(href):
-    return f"<a class='note' href='{href}'>← volver</a>"
-
-
+# ----------------------------- html / plantillas ----------------------------
 LAYOUT = """<!doctype html>
 <html lang="es">
 <head>
 <meta charset="utf-8">
 <title>__TITLE__</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Sube tu Excel de ventas y recibe un reporte ejecutivo claro con gráficas y resumen con IA, en español.">
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
-  :root { --bg:#0b1220; --card:#151f33; --acc:#34d399; --acc2:#38bdf8; --txt:#e5edf8; --mut:#8fa3bf; }
+  :root {
+    --ink:#0e1b2c; --ink2:#42526b; --bg:#f6f8fb; --card:#ffffff; --line:#e5eaf1;
+    --acc:#0e9f6e; --accd:#0b7f58; --blue:#2563eb; --warn:#b45309; --err:#b91c1c;
+    --r:14px; --shadow:0 1px 2px rgba(14,27,44,.05), 0 10px 30px rgba(14,27,44,.07);
+  }
   * { box-sizing:border-box; margin:0; }
-  body { background:var(--bg); color:var(--txt); font:15px/1.6 system-ui,Segoe UI,sans-serif; }
-  .wrap { max-width:880px; margin:0 auto; padding:24px 20px 80px; }
-  h1 { font-size:1.9rem; line-height:1.25; } h2 { font-size:1.3rem; } h3 { margin-bottom:8px; }
-  h1 span { color:var(--acc); }
-  a { color:var(--acc2); text-decoration:none; }
-  .topbar { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:16px; }
-  .card { background:var(--card); border:1px solid #2a3b58; border-radius:14px; padding:20px; margin:14px 0; }
-  .card.err { border-color:#7f1d1d; color:#fca5a5; }
-  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
-  input, textarea, select { background:#0f1930; color:var(--txt); border:1px solid #2a3b58;
-    border-radius:10px; padding:11px 14px; font:inherit; }
-  textarea { width:100%; min-height:90px; resize:vertical; }
-  button, .btn { background:var(--acc); color:#06281c; font-weight:700; border:0; border-radius:10px;
-    padding:11px 20px; cursor:pointer; font:inherit; display:inline-block; }
-  .ghost { background:#22304c; color:var(--txt); font-weight:500; }
-  .mini { padding:5px 12px; font-size:.82rem; }
-  .note { font-size:.82rem; color:var(--mut); }
-  .badge { background:#22304c; border-radius:20px; padding:4px 12px; font-size:.78rem; }
-  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin:14px 0; }
-  .kpi { background:#0f1930; border:1px solid #2a3b58; border-radius:10px; padding:12px; }
-  .kpi b { display:block; font-size:1.25rem; color:var(--acc); }
-  .kpi span { font-size:.75rem; color:var(--mut); }
-  .sum { background:#0f1930; border-left:3px solid var(--acc2); border-radius:8px; padding:14px; margin:12px 0; white-space:pre-wrap; }
-  table { width:100%; border-collapse:collapse; font-size:.9rem; }
-  td, th { padding:7px 10px; border-bottom:1px solid #22304c; text-align:left; }
-  .msg { background:#0f1930; border-radius:10px; padding:10px 14px; margin:8px 0; }
-  .msg.soporte { border-left:3px solid var(--acc); }
-  .msg.cliente { border-left:3px solid var(--acc2); }
-  .drop { border:2px dashed #2a3b58; border-radius:10px; padding:24px; text-align:center; color:var(--mut); cursor:pointer; margin:12px 0; }
-  .hero { text-align:center; padding:36px 0 20px; }
-  .sub { color:var(--mut); margin:12px auto 0; max-width:560px; }
-  .cta { display:flex; gap:10px; justify-content:center; margin:24px 0 8px; flex-wrap:wrap; }
-  .foot { text-align:center; color:var(--mut); font-size:.8rem; margin-top:40px; }
+  html { scroll-behavior:smooth; }
+  body { background:var(--bg); color:var(--ink); -webkit-font-smoothing:antialiased;
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif; }
+  .wrap { max-width:1040px; margin:0 auto; padding:20px 22px 90px; }
+  h1 { font-size:1.7rem; letter-spacing:-.02em; line-height:1.2; }
+  h2 { font-size:1.45rem; letter-spacing:-.02em; }
+  h3 { font-size:1.05rem; margin-bottom:8px; }
+  a { color:var(--blue); text-decoration:none; }
+  .muted { color:var(--ink2); font-size:.92rem; } .sm { font-size:.82rem; }
+  .topbar { display:flex; justify-content:space-between; align-items:center; padding:6px 0 22px; }
+  .brand { font-weight:800; font-size:1.15rem; color:var(--ink); letter-spacing:-.02em; }
+  .brand span { color:var(--acc); } .brand em { font-style:normal; color:var(--ink2); font-weight:500; font-size:.8rem; }
+  .tabs { display:flex; gap:6px; align-items:center; }
+  .tabs a { padding:8px 14px; border-radius:10px; color:var(--ink2); font-weight:500; font-size:.92rem; }
+  .tabs a.on, .tabs a:hover { background:#eaeff6; color:var(--ink); }
+  .navlink { padding:9px 16px; color:var(--ink2); font-weight:600; }
+  .btn { display:inline-block; background:var(--acc); color:#fff; font-weight:650; border:0;
+    border-radius:11px; padding:11px 20px; cursor:pointer; font:inherit; font-size:.95rem;
+    box-shadow:0 1px 2px rgba(14,27,44,.15); transition:background .15s, transform .1s; }
+  .btn:hover { background:var(--accd); } .btn:active { transform:scale(.98); }
+  .btn.ghost { background:#eef2f7; color:var(--ink); box-shadow:none; }
+  .btn.ghost:hover { background:#e2e8f1; }
+  .btn.sm { padding:6px 12px; font-size:.83rem; border-radius:9px; }
+  .btn.big { padding:14px 28px; font-size:1.02rem; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+    padding:24px; margin:16px 0; box-shadow:var(--shadow); }
+  .errbox { border-color:#fecaca; background:#fef2f2; color:var(--err); }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  input, textarea, select { background:#fff; color:var(--ink); border:1.5px solid var(--line);
+    border-radius:11px; padding:11px 14px; font:inherit; font-size:.95rem; outline:none; transition:border .15s; }
+  input:focus, textarea:focus { border-color:var(--acc); }
+  textarea { width:100%; min-height:100px; resize:vertical; }
+  .full { width:100%; margin-bottom:10px; }
+  .pagehead { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:8px 0 4px; }
+  .badge { background:#eef2f7; color:var(--ink2); border-radius:20px; padding:4px 13px; font-size:.78rem; font-weight:650; }
+  .badge.ok { background:#d9f2e5; color:var(--accd); }
+  .badge.warn { background:#fdf0dd; color:var(--warn); }
+  .chip { background:#eef2f7; border-radius:8px; padding:2px 9px; font-size:.78rem; color:var(--ink2); font-weight:600; }
+  .back { display:inline-block; margin:4px 0 6px; color:var(--ink2); font-size:.88rem; font-weight:550; }
+  table { width:100%; border-collapse:collapse; font-size:.92rem; }
+  td, th { padding:10px 12px; border-bottom:1px solid var(--line); text-align:left; }
+  th { color:var(--ink2); font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }
+  tr:last-child td { border-bottom:0; } .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin:16px 0; }
+  .kpi { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; box-shadow:var(--shadow); }
+  .kpi b { display:block; font-size:1.45rem; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+  .kpi span { font-size:.78rem; color:var(--ink2); font-weight:550; text-transform:uppercase; letter-spacing:.04em; }
+  .kpi.up b { color:var(--accd); } .kpi.down b { color:var(--err); } .kpi.warnk b { color:var(--warn); }
+  .sum { background:linear-gradient(135deg,#f0fdf7,#eff6ff); border:1px solid #d3e9de;
+    border-radius:12px; padding:18px 20px; margin:14px 0; white-space:pre-wrap; font-size:.96rem; }
+  .sum::before { content:"Resumen ejecutivo"; display:block; font-size:.72rem; font-weight:700;
+    letter-spacing:.08em; text-transform:uppercase; color:var(--accd); margin-bottom:6px; }
+  .charts { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:14px 0; }
+  .chartbox { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; box-shadow:var(--shadow); }
+  .chartbox h4 { font-size:.8rem; color:var(--ink2); text-transform:uppercase; letter-spacing:.05em; margin-bottom:10px; }
+  @media (max-width:760px) { .charts { grid-template-columns:1fr; } }
+  .msg { background:#f6f8fb; border-radius:12px; padding:12px 16px; margin:10px 0; font-size:.95rem; }
+  .msg.soporte { background:#f0fdf7; border:1px solid #d3e9de; }
+  .msg.cliente { background:#eff6ff; border:1px solid #dbe7fb; }
+  .msghead { font-weight:700; font-size:.82rem; margin-bottom:4px; }
+  .msghead span { color:var(--ink2); font-weight:500; }
+  .replyform { margin-top:14px; }
+  /* ------ landing ------ */
+  .hero { text-align:center; padding:64px 0 30px; }
+  .hero h1 { font-size:clamp(2rem, 5vw, 3.1rem); letter-spacing:-.035em; line-height:1.12; }
+  .hero h1 em { font-style:normal; color:var(--acc); }
+  .hero p.lead { color:var(--ink2); font-size:1.12rem; max-width:620px; margin:18px auto 0; }
+  .cta { display:flex; gap:10px; justify-content:center; margin:30px 0 8px; flex-wrap:wrap; }
+  .cta input { min-width:280px; }
+  .trust { color:var(--ink2); font-size:.82rem; }
+  .steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; margin:18px 0; }
+  .step { background:var(--card); border:1px solid var(--line); border-radius:var(--r); padding:22px; box-shadow:var(--shadow); }
+  .step .n { display:inline-flex; width:30px; height:30px; align-items:center; justify-content:center;
+    background:#d9f2e5; color:var(--accd); font-weight:800; border-radius:9px; margin-bottom:10px; }
+  .step b { display:block; margin-bottom:4px; }
+  .step span { color:var(--ink2); font-size:.9rem; }
+  .sectionhead { text-align:center; margin:56px 0 8px; }
+  .sectionhead .kicker { color:var(--acc); font-weight:700; font-size:.78rem; letter-spacing:.1em; text-transform:uppercase; }
+  .drop { border:2px dashed #cdd8e5; border-radius:var(--r); padding:38px 20px; text-align:center;
+    color:var(--ink2); cursor:pointer; margin:14px 0; transition:all .15s; background:#fbfcfe; font-weight:550; }
+  .drop:hover, .drop.on { border-color:var(--acc); background:#f0fdf7; color:var(--accd); }
+  .plans { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin:18px 0; }
+  .plancard { background:var(--card); border:1.5px solid var(--line); border-radius:var(--r); padding:26px; box-shadow:var(--shadow); position:relative; }
+  .plancard.pro { border-color:var(--acc); }
+  .plancard .ribbon { position:absolute; top:-11px; left:22px; background:var(--acc); color:#fff;
+    font-size:.7rem; font-weight:750; letter-spacing:.06em; text-transform:uppercase; padding:3px 12px; border-radius:20px; }
+  .plancard .price { font-size:1.9rem; font-weight:800; letter-spacing:-.03em; margin:4px 0 12px; }
+  .plancard ul { list-style:none; margin:0 0 16px; padding:0; }
+  .plancard li { padding:5px 0 5px 26px; position:relative; color:var(--ink2); font-size:.93rem; }
+  .plancard li::before { content:"✓"; position:absolute; left:2px; color:var(--acc); font-weight:800; }
+  details { background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:16px 20px; margin:10px 0; box-shadow:var(--shadow); }
+  details summary { cursor:pointer; font-weight:650; font-size:.98rem; }
+  details p { margin-top:10px; color:var(--ink2); font-size:.93rem; }
+  .foot { text-align:center; color:var(--ink2); font-size:.82rem; margin-top:64px; padding-top:24px; border-top:1px solid var(--line); }
+  .authcard { max-width:420px; margin:40px auto; }
 </style>
 </head>
-<body><div class="wrap">__CONTENT__</div></body>
+<body><div class="wrap">__CONTENT__</div>
+<script>
+function money(n) { return '$' + Number(n).toLocaleString('es-EC', {maximumFractionDigits:2}); }
+function escH(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML;}
+function kpiH(v,l,cls){ return '<div class="kpi '+(cls||'')+'"><b>'+v+'</b><span>'+l+'</span></div>'; }
+function renderReport(root, data) {
+  const m = data.metrics; let h = '';
+  h += '<div class="kpis">';
+  if (m.total !== undefined) {
+    h += kpiH(money(m.total),'ventas totales') + kpiH(m.transacciones,'transacciones')
+       + kpiH(money(m.promedio),'ticket promedio') + kpiH(money(m.maximo),'venta máxima');
+    if (m.variacion_pct !== undefined)
+      h += kpiH((m.variacion_pct>0?'+':'')+m.variacion_pct+'%','vs semana anterior', m.variacion_pct>=0?'up':'down');
+  } else h += kpiH(m.filas,'filas leídas');
+  h += '</div>';
+  if (data.resumen) h += '<div class="sum">'+escH(data.resumen)+'</div>';
+  const hasSerie = m.serie_semanal && m.serie_semanal.length > 1;
+  const hasTop = m.top_categorias && m.top_categorias.length;
+  if (hasSerie || hasTop) {
+    h += '<div class="charts">';
+    if (hasSerie) h += '<div class="chartbox"><h4>Ventas por semana</h4><canvas id="c-serie" height="220"></canvas></div>';
+    if (hasTop) h += '<div class="chartbox"><h4>Top ' + escH(String(m.col_categoria||'categorías')) + '</h4><canvas id="c-top" height="220"></canvas></div>';
+    h += '</div>';
+  }
+  if (!m.col_monto) h += '<p class="muted">No detecté una columna de montos. Nombra una columna "total", "monto" o "venta" para el análisis completo.</p>';
+  root.innerHTML = h;
+  if (typeof Chart === 'undefined') return;
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+  Chart.defaults.color = '#42526b';
+  if (hasSerie) {
+    new Chart(document.getElementById('c-serie'), { type:'line',
+      data:{ labels:m.serie_semanal.map(x=>x.semana.split('/')[0]),
+        datasets:[{ data:m.serie_semanal.map(x=>x.total), borderColor:'#0e9f6e',
+          backgroundColor:'rgba(14,159,110,.09)', fill:true, tension:.35, pointRadius:3,
+          pointBackgroundColor:'#0e9f6e', borderWidth:2.5 }]},
+      options:{ plugins:{legend:{display:false}}, scales:{ y:{ ticks:{ callback:v=>money(v) }, grid:{color:'#eef2f7'} }, x:{ grid:{display:false} } } } });
+  }
+  if (hasTop) {
+    new Chart(document.getElementById('c-top'), { type:'bar',
+      data:{ labels:m.top_categorias.map(x=>x.nombre),
+        datasets:[{ data:m.top_categorias.map(x=>x.total),
+          backgroundColor:['#0e9f6e','#2563eb','#7c3aed','#d97706','#64748b'], borderRadius:8 }]},
+      options:{ indexAxis:'y', plugins:{legend:{display:false}},
+        scales:{ x:{ ticks:{ callback:v=>money(v) }, grid:{color:'#eef2f7'} }, y:{ grid:{display:false} } } } });
+  }
+}
+</script>
+</body>
 </html>"""
 
 LANDING_BODY = """
-  <div class="topbar"><b>ReporteFácil</b><div>__NAV__</div></div>
+  <div class="topbar">
+    <a class="brand" href="/">Reporte<span>Fácil</span></a>
+    <nav class="tabs">__NAV__</nav>
+  </div>
+
   <div class="hero">
-    <h1>Tu negocio en Excel.<br>Tus decisiones, <span>explicadas cada lunes.</span></h1>
-    <div class="sub">Sube tu archivo de ventas y recibe un reporte claro: cuánto vendiste, qué producto jala,
-    qué está cayendo — con resumen ejecutivo por IA, en español. Crea tu cuenta y guarda tu historial.</div>
+    <h1>Deja de adivinar<br>qué pasa con <em>tus ventas</em>.</h1>
+    <p class="lead">Sube tu Excel de siempre y recibe al instante un reporte ejecutivo con gráficas:
+    cuánto vendiste, qué producto jala, qué está cayendo — y qué hacer al respecto. En español, para tu negocio.</p>
     <div class="cta">
       <input type="email" id="em" placeholder="tu@correo.com">
-      <button onclick="sub()">Quiero acceso anticipado</button>
+      <button class="btn big" onclick="sub()">Quiero acceso anticipado</button>
     </div>
-    <div class="note" id="submsg">Sin spam. Solo el aviso de lanzamiento.</div>
+    <div class="trust" id="submsg">Gratis · Sin tarjeta · Sin spam</div>
   </div>
-  <div class="card">
-    <h3>Pruébalo ahora — gratis, sin registro</h3>
-    <div class="note">Sube un .csv o .xlsx con tus ventas. Nada se guarda si no tienes cuenta.</div>
+
+  <div class="card" id="demo">
+    <h3>Pruébalo con tus datos — gratis, sin registro</h3>
+    <p class="muted">Arrastra tu .csv o .xlsx de ventas. El análisis corre al momento y no guardamos tu archivo.</p>
     <div class="drop" id="drop" onclick="document.getElementById('file').click()">
-      Arrastra tu archivo aquí o haz click para elegirlo</div>
+      Arrastra tu archivo aquí <span style="font-weight:400">o haz click para elegirlo</span></div>
     <input type="file" id="file" accept=".csv,.xlsx,.xls" style="display:none" onchange="up(this.files[0])">
     <div id="result"></div>
   </div>
-  <div class="foot">ReporteFácil · hecho en Ecuador</div>
+
+  <div class="sectionhead"><div class="kicker">Cómo funciona</div><h2>Tres pasos. Cero configuración.</h2></div>
+  <div class="steps">
+    <div class="step"><span class="n">1</span><b>Sube tu Excel</b><span>El mismo archivo que ya usas. Detectamos fechas, productos y montos automáticamente.</span></div>
+    <div class="step"><span class="n">2</span><b>Recibe tu reporte</b><span>KPIs claros, gráficas de tendencia y tu top de productos — en segundos, no en horas.</span></div>
+    <div class="step"><span class="n">3</span><b>Decide con datos</b><span>El resumen ejecutivo te dice qué va bien, qué preocupa y qué hacer esta semana.</span></div>
+  </div>
+
+  <div class="sectionhead"><div class="kicker">Precios</div><h2>Empieza gratis. Crece cuando te sirva.</h2></div>
+  <div class="plans">
+    <div class="plancard">
+      <h3>Gratis</h3><div class="price">$0</div>
+      <ul><li>Reportes manuales ilimitados</li><li>KPIs y gráficas interactivas</li><li>Historial en tu cuenta</li></ul>
+      <a class="btn ghost" href="/registro">Crear cuenta gratis</a>
+    </div>
+    <div class="plancard pro">
+      <div class="ribbon">Recomendado</div>
+      <h3>Pro</h3><div class="price">__PRICE__</div>
+      <ul><li>Reporte automático cada lunes en tu correo</li><li>Resumen ejecutivo con IA</li><li>Soporte prioritario en menos de 24 h</li></ul>
+      <a class="btn" href="/registro">Empezar con Pro</a>
+    </div>
+  </div>
+
+  <div class="sectionhead"><div class="kicker">Preguntas frecuentes</div><h2>Lo que suelen preguntarnos</h2></div>
+  <details><summary>¿Necesito saber de Excel o de datos?</summary>
+    <p>No. Si sabes guardar un archivo, sabes usar ReporteFácil. Subes tu archivo y el análisis sale solo.</p></details>
+  <details><summary>¿Qué pasa con mis datos?</summary>
+    <p>En el demo, tu archivo se procesa y se descarta — no lo guardamos. Con cuenta, solo guardamos las métricas calculadas para tu historial, nunca el archivo original.</p></details>
+  <details><summary>¿Funciona con mi formato de Excel?</summary>
+    <p>Aceptamos .csv y .xlsx. Detectamos automáticamente columnas de fecha, producto y monto aunque tengan otros nombres. Si algo no cuadra, soporte te lo resuelve en menos de 24 h.</p></details>
+  <details><summary>¿Cómo se paga el plan Pro?</summary>
+    <p>Con link de pago (PayPal y medios locales). Activamos tu cuenta en menos de 24 horas tras confirmar el pago.</p></details>
+
+  <div class="hero" style="padding-top:40px">
+    <h2>Tu próxima decisión, con datos.</h2>
+    <div class="cta"><a class="btn big" href="/registro">Crear cuenta gratis</a></div>
+  </div>
+
+  <div class="foot">ReporteFácil · hecho en Ecuador · <a href="/login">Entrar</a></div>
+
 <script>
 async function sub() {
   const em = document.getElementById('em').value.trim();
@@ -651,67 +857,55 @@ async function sub() {
   msg.textContent = d.ok ? '✓ Listo. Te avisamos al lanzar.' : (d.error || 'Error.');
 }
 const drop = document.getElementById('drop');
-['dragover','dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); }));
-drop.addEventListener('drop', ev => { ev.preventDefault(); up(ev.dataTransfer.files[0]); });
-function esc(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML;}
-function money(n){ return '$' + Number(n).toLocaleString('es-EC', {maximumFractionDigits:2}); }
-function kpi(v,l){ return '<div class="kpi"><b>'+v+'</b><span>'+l+'</span></div>'; }
+['dragover','dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('on'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('on'); }));
+drop.addEventListener('drop', ev => up(ev.dataTransfer.files[0]));
 async function up(file) {
   if (!file) return;
   const out = document.getElementById('result');
-  out.innerHTML = '<div class="note">Analizando ' + esc(file.name) + '...</div>';
+  out.innerHTML = '<p class="muted">Analizando ' + escH(file.name) + '…</p>';
   const fd = new FormData(); fd.append('file', file);
   try {
     const r = await fetch('/report-demo', { method:'POST', body: fd });
     const d = await r.json();
-    if (d.error) { out.innerHTML = '<div class="card err">'+esc(d.error)+'</div>'; return; }
-    const m = d.metrics;
-    let h = '<div class="kpis">';
-    if (m.total !== undefined) {
-      h += kpi(money(m.total),'ventas totales') + kpi(m.transacciones,'transacciones')
-         + kpi(money(m.promedio),'ticket promedio') + kpi(money(m.maximo),'venta máxima');
-      if (m.variacion_pct !== undefined) h += kpi(m.variacion_pct+'%','vs semana anterior');
-    } else h += kpi(m.filas,'filas leídas');
-    h += '</div>';
-    if (d.resumen) h += '<div class="sum">'+esc(d.resumen)+'</div>';
-    if (m.top_categorias) h += '<table><tr><th>'+esc(m.col_categoria)+'</th><th>Total</th></tr>'
-      + m.top_categorias.map(t=>'<tr><td>'+esc(t.nombre)+'</td><td>'+money(t.total)+'</td></tr>').join('') + '</table>';
-    h += '<div class="row"><a class="btn" href="/registro">Crear cuenta para guardar reportes</a></div>';
-    out.innerHTML = h;
-  } catch(e) { out.innerHTML = '<div class="card err">Error: '+esc(String(e))+'</div>'; }
+    if (d.error) { out.innerHTML = '<div class="card errbox">'+escH(d.error)+'</div>'; return; }
+    renderReport(out, d);
+    out.insertAdjacentHTML('beforeend',
+      '<div class="row" style="justify-content:center"><a class="btn" href="/registro">Crear cuenta para guardar este reporte</a></div>');
+  } catch(e) { out.innerHTML = '<div class="card errbox">Error: '+escH(String(e))+'</div>'; }
 }
-</script>"""
+</script>""".replace("__PRICE__", PLAN_PRICE)
 
 AUTH_FORM = """
-  <div class="hero"><h2><a href="/">ReporteFácil</a></h2></div>
-  <div class="card" style="max-width:420px;margin:0 auto">
-    <h3 id="t"></h3>
+  <div class="topbar"><a class="brand" href="/">Reporte<span>Fácil</span></a></div>
+  <div class="card authcard">
+    <h2 id="t" style="margin-bottom:14px"></h2>
     <form method="post">
-      <input type="email" name="email" placeholder="tu@correo.com" required style="width:100%;margin-bottom:8px">
-      <input type="password" name="password" placeholder="Contraseña (mín. 8)" required minlength="8" style="width:100%;margin-bottom:8px">
+      <input type="email" name="email" placeholder="tu@correo.com" required class="full">
+      <input type="password" name="password" placeholder="Contraseña (mínimo 8 caracteres)" required minlength="8" class="full">
       <span id="biz"></span>
-      <button style="width:100%">Continuar</button>
+      <button class="btn" style="width:100%">Continuar</button>
     </form>
-    <div class="note" style="margin-top:10px" id="alt"></div>
+    <p class="muted sm" style="margin-top:12px" id="alt"></p>
   </div>
   <script>
     const mode = "__MODE__";
-    document.getElementById('t').textContent = mode === 'registro' ? 'Crear cuenta' : 'Entrar';
+    document.getElementById('t').textContent = mode === 'registro' ? 'Crea tu cuenta gratis' : 'Bienvenido de vuelta';
     if (mode === 'registro') {
       document.getElementById('biz').innerHTML =
-        '<input type="text" name="business" placeholder="Nombre de tu negocio (opcional)" style="width:100%;margin-bottom:8px">';
+        '<input type="text" name="business" placeholder="Nombre de tu negocio (opcional)" class="full">';
       document.getElementById('alt').innerHTML = '¿Ya tienes cuenta? <a href="/login">Entra aquí</a>';
     } else {
-      document.getElementById('alt').innerHTML = '¿No tienes cuenta? <a href="/registro">Créala aquí</a>';
+      document.getElementById('alt').innerHTML = '¿No tienes cuenta? <a href="/registro">Créala gratis</a>';
     }
   </script>"""
 
 ADMIN_LOGIN_FORM = """
-  <div class="card" style="max-width:380px;margin:60px auto">
-    <h3>Panel de administración</h3>
+  <div class="card authcard" style="margin-top:70px">
+    <h2 style="margin-bottom:14px">Panel de administración</h2>
     <form method="post">
-      <input type="password" name="password" placeholder="Contraseña admin" required style="width:100%;margin-bottom:8px">
-      <button style="width:100%">Entrar</button>
+      <input type="password" name="password" placeholder="Contraseña de administrador" required class="full">
+      <button class="btn" style="width:100%">Entrar</button>
     </form>
   </div>"""
 
@@ -719,6 +913,5 @@ init_db()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8090"))
-    print(f"\n  ReporteFácil portal -> http://localhost:{port}")
-    print(f"  Admin -> http://localhost:{port}/admin (contraseña: variable ADMIN_PASSWORD)\n")
+    print(f"\n  ReporteFácil v3 -> http://localhost:{port}\n")
     app.run(host="0.0.0.0", port=port, debug=False)

@@ -47,6 +47,7 @@ def init_db():
     con.executescript("""
     CREATE TABLE IF NOT EXISTS leads (
         id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL,
+        source TEXT NOT NULL DEFAULT 'landing',
         created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL,
@@ -256,19 +257,26 @@ def terms():
     return page(body, "Términos — ReporteFácil")
 
 
-@app.route("/subscribe", methods=["POST"])
-def subscribe():
-    email = ((request.get_json(silent=True) or {}).get("email") or "").strip().lower()
-    if "@" not in email or "." not in email.split("@")[-1] or len(email) < 6:
-        return jsonify(error="Correo inválido."), 400
+def save_lead(email, source):
     con = db()
     try:
-        con.execute("INSERT INTO leads (email, created_at) VALUES (?,?)", (email, now()))
+        con.execute("INSERT INTO leads (email, source, created_at) VALUES (?,?,?)", (email, source, now()))
         con.commit()
     except sqlite3.IntegrityError:
-        pass
+        con.execute("UPDATE leads SET source=? WHERE email=? AND source='landing'", (source, email))
+        con.commit()
     finally:
         con.close()
+
+
+@app.route("/subscribe", methods=["POST"])
+def subscribe():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    source = "pro-waitlist" if data.get("source") == "pro" else "landing"
+    if "@" not in email or "." not in email.split("@")[-1] or len(email) < 6:
+        return jsonify(error="Correo inválido."), 400
+    save_lead(email, source)
     return jsonify(ok=True)
 
 
@@ -440,8 +448,12 @@ def view_report(rid):
 def plan():
     u = current_user()
     status = u["plan_status"]
-    pay = (f'<a class="btn" href="{esc(PAYMENT_LINK)}" target="_blank" rel="noopener">Pagar {esc(PLAN_PRICE)}</a>'
-           if PAYMENT_LINK else '<p class="muted">El link de pago estará disponible muy pronto. Escríbenos por soporte si quieres activar Pro hoy.</p>')
+    con = db()
+    in_waitlist = con.execute("SELECT 1 FROM leads WHERE email=? AND source='pro-waitlist'",
+                              (u["email"],)).fetchone() is not None
+    con.close()
+    wait_cta = ("<span class='badge ok'>Estás en la lista ✓ — te avisamos al lanzar</span>" if in_waitlist else
+                "<form action='/plan/lista-pro' method='post'><button class='btn'>Unirme a la lista de Pro</button></form>")
     blocks = {
         "free": f"""
         <div class="plans">
@@ -451,14 +463,13 @@ def plan():
             <span class="badge ok">Tu plan actual</span>
           </div>
           <div class="plancard pro">
-            <div class="ribbon">Recomendado</div>
+            <div class="ribbon">Muy pronto</div>
             <h3>Pro</h3><div class="price">{esc(PLAN_PRICE)}</div>
             <ul><li>Reporte automático cada lunes en tu correo</li><li>Resumen ejecutivo con IA</li><li>Soporte prioritario</li></ul>
-            <div class="row">{pay}
-            <form action="/plan/ya-pague" method="post"><button class="btn ghost">Ya pagué — verificar</button></form></div>
-            <p class="muted sm">Tras pagar, pulsa "Ya pagué". Activamos tu cuenta en menos de 24 h.</p>
-            <div class="paynote">🔐 <span>El pago se procesa de forma segura en la plataforma del proveedor (PayPal o pasarela local).
-            <b>Nunca ingresas datos de tarjeta en ReporteFácil.</b> Ver <a href="/terminos">términos</a> y política de reembolso.</span></div>
+            <div class="row">{wait_cta}</div>
+            <p class="muted sm">Pro está en fase final de desarrollo. Los de la lista entran primero y con precio de lanzamiento.</p>
+            <div class="paynote">🔐 <span>Cuando Pro lance, el pago se procesará en la plataforma del proveedor (PayPal o pasarela local).
+            <b>Nunca ingresarás datos de tarjeta en ReporteFácil.</b> Ver <a href="/terminos">términos</a>.</span></div>
           </div>
         </div>""",
         "pending": "<div class='card'><h3>Pago en verificación</h3><p>Activamos tu plan Pro en menos de 24 horas. Si tarda más, abre un ticket de soporte y lo resolvemos.</p></div>",
@@ -468,13 +479,11 @@ def plan():
                 "Mi plan — ReporteFácil")
 
 
-@app.route("/plan/ya-pague", methods=["POST"])
+@app.route("/plan/lista-pro", methods=["POST"])
 @login_required
-def plan_paid():
-    con = db()
-    con.execute("UPDATE users SET plan_status='pending' WHERE id=? AND plan_status='free'", (session["uid"],))
-    con.commit()
-    con.close()
+def plan_waitlist():
+    u = current_user()
+    save_lead(u["email"], "pro-waitlist")
     return redirect("/plan")
 
 
@@ -598,7 +607,11 @@ def admin():
         f"<tr><td><span class='chip'>#{t['id']}</span></td><td>{esc(t['email'])}</td>"
         f"<td><a href='/admin/ticket/{t['id']}'>{esc(t['subject'])}</a></td>"
         f"<td>{t['created_at'][:10]}</td></tr>" for t in tickets)
-    lrows = "".join(f"<tr><td>{esc(x['email'])}</td><td>{x['created_at'][:10]}</td></tr>" for x in leads_rows)
+    nwait = sum(1 for x in leads_rows if x["source"] == "pro-waitlist")
+    lrows = "".join(
+        f"<tr><td>{esc(x['email'])}</td>"
+        f"<td><span class='badge {'ok' if x['source'] == 'pro-waitlist' else ''}'>{'Lista Pro' if x['source'] == 'pro-waitlist' else 'Landing'}</span></td>"
+        f"<td>{x['created_at'][:10]}</td></tr>" for x in leads_rows)
     body = f"""
     <div class="topbar"><a class="brand" href="/">Reporte<span>Fácil</span> <em>admin</em></a>
       <nav class="tabs"><a href="/logout">Salir</a></nav></div>
@@ -609,8 +622,8 @@ def admin():
       {'' if urows else '<p class="muted">Sin usuarios aún.</p>'}</div>
     <div class="card"><h3>Tickets abiertos</h3>
       {'<table><tr><th></th><th>Cliente</th><th>Asunto</th><th>Fecha</th></tr>' + trows + '</table>' if trows else '<p class="muted">Ninguno.</p>'}</div>
-    <div class="card"><h3>Leads de la landing</h3>
-      {'<table><tr><th>Correo</th><th>Fecha</th></tr>' + lrows + '</table>' if lrows else '<p class="muted">Ninguno todavía.</p>'}</div>"""
+    <div class="card"><h3>Leads <span class="chip">{nwait} en lista Pro</span></h3>
+      {'<table><tr><th>Correo</th><th>Origen</th><th>Fecha</th></tr>' + lrows + '</table>' if lrows else '<p class="muted">Ninguno todavía.</p>'}</div>"""
     return page(body, "Admin — ReporteFácil")
 
 
@@ -894,10 +907,11 @@ LANDING_BODY = """
       <a class="btn ghost" href="/registro">Crear cuenta gratis</a>
     </div>
     <div class="plancard pro">
-      <div class="ribbon">Recomendado</div>
+      <div class="ribbon">Muy pronto</div>
       <h3>Pro</h3><div class="price">__PRICE__</div>
       <ul><li>Reporte automático cada lunes en tu correo</li><li>Resumen ejecutivo con IA</li><li>Soporte prioritario en menos de 24 h</li></ul>
-      <a class="btn" href="/registro">Empezar con Pro</a>
+      <button class="btn" onclick="joinPro()">Unirme a la lista de Pro</button>
+      <p class="muted sm" id="promsg" style="margin-top:8px">En fase final de desarrollo. La lista entra primero, con precio de lanzamiento.</p>
     </div>
   </div>
 
@@ -908,8 +922,9 @@ LANDING_BODY = """
     <p>En el demo, tu archivo se procesa y se descarta — no lo guardamos. Con cuenta, solo guardamos las métricas calculadas para tu historial, nunca el archivo original.</p></details>
   <details><summary>¿Funciona con mi formato de Excel?</summary>
     <p>Aceptamos .csv y .xlsx. Detectamos automáticamente columnas de fecha, producto y monto aunque tengan otros nombres. Si algo no cuadra, soporte te lo resuelve en menos de 24 h.</p></details>
-  <details><summary>¿Cómo se paga el plan Pro?</summary>
-    <p>Con link de pago (PayPal y medios locales). Activamos tu cuenta en menos de 24 horas tras confirmar el pago.</p></details>
+  <details><summary>¿Cuándo lanza el plan Pro y cómo se pagará?</summary>
+    <p>Pro está en fase final de desarrollo. Los de la lista de espera entran primero y con precio de lanzamiento.
+    El pago será con link seguro (PayPal y medios locales) — nunca ingresas datos de tarjeta en ReporteFácil.</p></details>
 
   <div class="hero" style="padding-top:40px">
     <h2>Tu próxima decisión, con datos.</h2>
@@ -928,6 +943,16 @@ async function sub() {
     body: JSON.stringify({email:em}) });
   const d = await r.json();
   msg.textContent = d.ok ? '✓ Listo. Te avisamos al lanzar.' : (d.error || 'Error.');
+}
+async function joinPro() {
+  const em = document.getElementById('em').value.trim();
+  const msg = document.getElementById('promsg');
+  if (!em) { msg.textContent = 'Escribe tu correo en el campo de arriba y vuelve a pulsar.';
+    document.getElementById('em').focus(); window.scrollTo({top:0, behavior:'smooth'}); return; }
+  const r = await fetch('/subscribe', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email:em, source:'pro'}) });
+  const d = await r.json();
+  msg.textContent = d.ok ? '✓ Estás en la lista de Pro. Te avisamos al lanzar.' : (d.error || 'Error.');
 }
 const drop = document.getElementById('drop');
 ['dragover','dragenter'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('on'); }));

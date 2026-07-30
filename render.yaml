@@ -12,5 +12,7 @@ services:
         generateValue: true
       - key: ADMIN_PASSWORD
         generateValue: true
+      - key: CRON_TOKEN
+        generateValue: true
       - key: PLAN_PRICE
         value: $29/mes

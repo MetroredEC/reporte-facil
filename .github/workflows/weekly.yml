@@ -1,0 +1,16 @@
+name: Reporte semanal
+on:
+  schedule:
+    # Lunes 12:00 UTC = 07:00 Ecuador
+    - cron: "0 12 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  enviar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Despertar el servicio (plan free duerme)
+        run: curl -fsS -m 90 "https://reporte-facil.onrender.com/" > /dev/null || true
+      - name: Disparar envio semanal
+        run: |
+          curl -fsS -m 120 "https://reporte-facil.onrender.com/tasks/weekly?token=${{ secrets.CRON_TOKEN }}"

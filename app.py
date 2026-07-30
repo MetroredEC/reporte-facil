@@ -29,6 +29,14 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "cambiame")
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "")
 PLAN_PRICE = os.getenv("PLAN_PRICE", "$29/mes")
 SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+CRON_TOKEN = os.getenv("CRON_TOKEN", "")
+MAIL_FROM = os.getenv("MAIL_FROM", "ReporteFacil <onboarding@resend.dev>")
+APP_URL = os.getenv("APP_URL", "https://reporte-facil.onrender.com")
+
+INDUSTRIES = ["Retail / tienda", "Restaurante / comida", "Servicios profesionales",
+              "Distribución / mayorista", "Belleza / cuidado personal", "Salud",
+              "Construcción / ferretería", "Otro"]
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "portal.db")
 
@@ -52,6 +60,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL,
         pw_hash TEXT NOT NULL, business TEXT DEFAULT '',
+        industry TEXT DEFAULT '',
         plan_status TEXT NOT NULL DEFAULT 'free',
         created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS reports (
@@ -121,21 +130,109 @@ def analyze(df):
     return out
 
 
-def ai_summary(metrics):
+def ai_summary(metrics, industry=""):
     if not API_KEY:
         return None
+    sys_prompt = ("Eres un analista de negocios para PYMEs de Ecuador. Con las métricas dadas, "
+                  "escribe un resumen ejecutivo en español de 5-8 frases: qué va bien, qué preocupa, "
+                  "y UNA recomendación accionable esta semana. Sin inventar datos de las métricas. Tono directo.")
+    if industry:
+        sys_prompt += (
+            f" El negocio es del sector: {industry}. Añade al final un párrafo corto titulado "
+            "'Contexto de tu sector' con 2-3 observaciones útiles sobre ese sector en Ecuador "
+            "(estacionalidad, hábitos de compra, dinámica típica). Acláralo como orientación general, "
+            "no como cifras oficiales, y no inventes estadísticas específicas.")
     try:
         from anthropic import Anthropic
         client = Anthropic(api_key=API_KEY)
         resp = client.messages.create(
-            model=MODEL, max_tokens=400,
-            system=("Eres un analista de negocios para PYMEs latinoamericanas. Con las métricas dadas, "
-                    "escribe un resumen ejecutivo de 4-6 frases en español: qué va bien, qué preocupa, "
-                    "y UNA recomendación accionable. Sin inventar datos. Tono directo."),
+            model=MODEL, max_tokens=600, system=sys_prompt,
             messages=[{"role": "user", "content": json.dumps(metrics, ensure_ascii=False)}])
         return resp.content[0].text.strip()
     except Exception:  # noqa: BLE001
         return None
+
+
+# ------------------------------ motor semanal -------------------------------
+def send_email(to, subject, html):
+    """Envía por Resend. Devuelve (ok, detalle)."""
+    if not RESEND_API_KEY:
+        return False, "RESEND_API_KEY no configurada"
+    import urllib.request
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps({"from": MAIL_FROM, "to": [to], "subject": subject, "html": html}).encode(),
+        headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return True, r.read().decode()[:200]
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)[:200]
+
+
+def weekly_email_html(user, metrics, summary):
+    total = metrics.get("total")
+    kpis = ""
+    if total is not None:
+        pairs = [(f"${total:,}", "Ventas totales"), (metrics.get("transacciones", "—"), "Transacciones"),
+                 (f"${metrics.get('promedio', 0):,}", "Ticket promedio")]
+        if metrics.get("variacion_pct") is not None:
+            v = metrics["variacion_pct"]
+            pairs.append((f"{'+' if v > 0 else ''}{v}%", "vs semana anterior"))
+        kpis = "".join(
+            f"<td style='padding:14px 18px;background:#f6f8fb;border-radius:10px;text-align:center'>"
+            f"<div style='font-size:22px;font-weight:800;color:#0e1b2c'>{v}</div>"
+            f"<div style='font-size:11px;color:#42526b;text-transform:uppercase;letter-spacing:.05em'>{l}</div></td>"
+            f"<td style='width:8px'></td>" for v, l in pairs)
+    top = ""
+    if metrics.get("top_categorias"):
+        rows = "".join(
+            f"<tr><td style='padding:7px 0;border-bottom:1px solid #e5eaf1'>{esc(t['nombre'])}</td>"
+            f"<td style='padding:7px 0;border-bottom:1px solid #e5eaf1;text-align:right'>${t['total']:,}</td></tr>"
+            for t in metrics["top_categorias"])
+        top = (f"<h3 style='margin:22px 0 6px;font-size:15px'>Top {esc(str(metrics.get('col_categoria') or 'productos'))}</h3>"
+               f"<table style='width:100%;border-collapse:collapse;font-size:14px'>{rows}</table>")
+    sum_html = (f"<div style='background:#f0fdf7;border-left:3px solid #0e9f6e;border-radius:8px;"
+                f"padding:14px 18px;margin:18px 0;font-size:14px;white-space:pre-wrap'>{esc(summary)}</div>"
+                if summary else "")
+    return f"""
+    <div style="max-width:560px;margin:0 auto;font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#0e1b2c;padding:24px">
+      <div style="font-weight:800;font-size:18px;margin-bottom:4px">Reporte<span style="color:#0e9f6e">Fácil</span></div>
+      <h2 style="margin:8px 0 2px;font-size:20px">Tu resumen semanal, {esc(user['business'] or user['email'].split('@')[0])}</h2>
+      <p style="color:#42526b;font-size:13px;margin:2px 0 18px">Basado en tu último reporte subido.</p>
+      <table style="width:100%;border-collapse:collapse"><tr>{kpis}</tr></table>
+      {sum_html}{top}
+      <a href="{APP_URL}/dashboard" style="display:inline-block;margin-top:20px;background:#0e9f6e;color:#fff;
+        font-weight:700;padding:11px 22px;border-radius:10px;text-decoration:none;font-size:14px">
+        Subir ventas de esta semana</a>
+      <p style="color:#8fa3bf;font-size:11px;margin-top:26px">Recibes este correo por tu plan Pro de ReporteFácil.
+      El contexto sectorial es orientación general, no cifras oficiales.</p>
+    </div>"""
+
+
+@app.route("/tasks/weekly")
+def weekly_task():
+    if not CRON_TOKEN or request.args.get("token") != CRON_TOKEN:
+        return jsonify(error="no autorizado"), 403
+    con = db()
+    users = con.execute("SELECT * FROM users WHERE plan_status='active'").fetchall()
+    sent, skipped, errors = 0, 0, []
+    for u in users:
+        r = con.execute("SELECT * FROM reports WHERE user_id=? ORDER BY id DESC LIMIT 1", (u["id"],)).fetchone()
+        if not r:
+            skipped += 1
+            continue
+        m = json.loads(r["metrics"])
+        summary = ai_summary(m, u["industry"]) or r["summary"]
+        ok, detail = send_email(u["email"], "Tu resumen semanal de ventas — ReporteFácil",
+                                weekly_email_html(u, m, summary))
+        if ok:
+            sent += 1
+        else:
+            errors.append(f"{u['email']}: {detail}")
+    con.close()
+    return jsonify(pro_users=len(users), sent=sent, sin_reportes=skipped, errors=errors)
 
 
 def parse_upload(f):
@@ -296,26 +393,33 @@ def report_demo():
 
 
 # ---------------------------------- auth ------------------------------------
+def auth_form(mode):
+    return AUTH_FORM.replace("__MODE__", mode).replace("__INDUSTRIES__", json.dumps(INDUSTRIES, ensure_ascii=False))
+
+
 @app.route("/registro", methods=["GET", "POST"])
 def register():
     if request.method == "GET":
-        return page(AUTH_FORM.replace("__MODE__", "registro"), "Crear cuenta — ReporteFácil")
+        return page(auth_form("registro"), "Crear cuenta — ReporteFácil")
     email = (request.form.get("email") or "").strip().lower()
     pw = request.form.get("password") or ""
     business = (request.form.get("business") or "").strip()
+    industry = (request.form.get("industry") or "").strip()
+    if industry not in INDUSTRIES:
+        industry = ""
     if "@" not in email or len(pw) < 8:
         return page(err_box("Correo inválido o contraseña menor a 8 caracteres.")
-                    + AUTH_FORM.replace("__MODE__", "registro"), "Crear cuenta")
+                    + auth_form("registro"), "Crear cuenta")
     con = db()
     try:
-        cur = con.execute("INSERT INTO users (email, pw_hash, business, created_at) VALUES (?,?,?,?)",
-                          (email, generate_password_hash(pw), business, now()))
+        cur = con.execute("INSERT INTO users (email, pw_hash, business, industry, created_at) VALUES (?,?,?,?,?)",
+                          (email, generate_password_hash(pw), business, industry, now()))
         con.commit()
         session["uid"] = cur.lastrowid
     except sqlite3.IntegrityError:
         con.close()
         return page(err_box("Ese correo ya tiene cuenta. <a href='/login'>Entra aquí</a>.")
-                    + AUTH_FORM.replace("__MODE__", "registro"), "Crear cuenta")
+                    + auth_form("registro"), "Crear cuenta")
     con.close()
     return redirect(url_for("dashboard"))
 
@@ -323,7 +427,7 @@ def register():
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
     if request.method == "GET":
-        return page(AUTH_FORM.replace("__MODE__", "login"), "Entrar — ReporteFácil")
+        return page(auth_form("login"), "Entrar — ReporteFácil")
     email = (request.form.get("email") or "").strip().lower()
     pw = request.form.get("password") or ""
     con = db()
@@ -331,7 +435,7 @@ def login_page():
     con.close()
     if not u or not check_password_hash(u["pw_hash"], pw):
         return page(err_box("Correo o contraseña incorrectos.")
-                    + AUTH_FORM.replace("__MODE__", "login"), "Entrar")
+                    + auth_form("login"), "Entrar")
     session["uid"] = u["id"]
     return redirect(url_for("dashboard"))
 
@@ -357,6 +461,20 @@ def portal_nav(u, active=""):
     </div>"""
 
 
+@app.route("/perfil", methods=["POST"])
+@login_required
+def update_profile():
+    industry = (request.form.get("industry") or "").strip()
+    business = (request.form.get("business") or "").strip()
+    if industry not in INDUSTRIES:
+        industry = ""
+    con = db()
+    con.execute("UPDATE users SET industry=?, business=? WHERE id=?", (industry, business, session["uid"]))
+    con.commit()
+    con.close()
+    return redirect("/dashboard")
+
+
 @app.route("/dashboard")
 @login_required
 def dashboard():
@@ -366,6 +484,10 @@ def dashboard():
         "SELECT id, filename, created_at, metrics FROM reports WHERE user_id=? ORDER BY id DESC LIMIT 50",
         (u["id"],)).fetchall()
     con.close()
+    # Tendencia histórica: total de ventas por reporte (cronológico)
+    trend = [{"fecha": r["created_at"][:10], "archivo": r["filename"],
+              "total": json.loads(r["metrics"]).get("total")}
+             for r in reversed(reports) if json.loads(r["metrics"]).get("total") is not None]
     rows = "".join(
         f"<tr><td><span class='chip'>#{r['id']}</span></td><td>{esc(r['filename'])}</td>"
         f"<td>{r['created_at'][:10]}</td>"
@@ -379,9 +501,21 @@ def dashboard():
     badge = {"free": "<span class='badge'>Plan Gratis</span>",
              "pending": "<span class='badge warn'>Pago en verificación</span>",
              "active": "<span class='badge ok'>Plan Pro ✓</span>"}[u["plan_status"]]
+    ind_opts = "".join(
+        f"<option {'selected' if i == u['industry'] else ''}>{i}</option>" for i in INDUSTRIES)
+    trend_card = ""
+    if len(trend) >= 2:
+        trend_card = f"""
+    <div class="card">
+      <h3>Evolución de tus ventas</h3>
+      <p class="muted">Total de ventas de cada reporte que has subido. La foto grande de tu negocio.</p>
+      <div class="chartbox" style="border:0;box-shadow:none;padding:6px 0 0"><canvas id="c-trend" height="190"></canvas></div>
+      <script>window.__TREND__ = {json.dumps(trend, ensure_ascii=False)};</script>
+    </div>"""
     body = f"""
     {portal_nav(u, 'dash')}
-    <div class="pagehead"><h1>Hola, {esc(u['business'] or u['email'].split('@')[0])}</h1>{badge}</div>
+    <div class="pagehead"><h1>Hola, {esc(u['business'] or u['email'].split('@')[0])}</h1>{badge}
+      {f"<span class='chip'>{esc(u['industry'])}</span>" if u['industry'] else ''}</div>
     <div class="card">
       <h3>Nuevo reporte</h3>
       <p class="muted">Sube tu archivo de ventas (.csv o .xlsx). El reporte se genera al instante y queda en tu historial.</p>
@@ -390,10 +524,34 @@ def dashboard():
         <button class="btn">Generar reporte</button>
       </form>
     </div>
+    {trend_card}
     <div class="card">
       <h3>Historial</h3>
       {'<table><tr><th></th><th>Archivo</th><th>Fecha</th><th class="num">Ventas</th><th></th></tr>' + rows + '</table>' if rows else '<p class="muted">Aún no tienes reportes. Sube tu primer archivo arriba.</p>'}
-    </div>"""
+    </div>
+    <div class="card">
+      <h3>Tu negocio</h3>
+      <p class="muted">Con tu sector, el resumen ejecutivo incluye contexto específico de tu industria en Ecuador.</p>
+      <form action="/perfil" method="post" class="row">
+        <input type="text" name="business" placeholder="Nombre de tu negocio" value="{esc(u['business'])}">
+        <select name="industry"><option value="">Sector...</option>{ind_opts}</select>
+        <button class="btn ghost">Guardar</button>
+      </form>
+    </div>
+    <script>
+    if (window.__TREND__ && typeof Chart !== 'undefined') {{
+      Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+      new Chart(document.getElementById('c-trend'), {{ type:'line',
+        data:{{ labels:window.__TREND__.map(x=>x.fecha),
+          datasets:[{{ data:window.__TREND__.map(x=>x.total), borderColor:'#2563eb',
+            backgroundColor:'rgba(37,99,235,.08)', fill:true, tension:.3, pointRadius:4,
+            pointBackgroundColor:'#2563eb', borderWidth:2.5 }}]}},
+        options:{{ plugins:{{legend:{{display:false}}, tooltip:{{callbacks:{{
+            afterLabel:(c)=>window.__TREND__[c.dataIndex].archivo }}}}}},
+          scales:{{ y:{{ ticks:{{ callback:v=>money(v) }}, grid:{{color:'#eef2f7'}} }},
+            x:{{ grid:{{display:false}} }} }} }} }});
+    }}
+    </script>"""
     return page(body, "Mi panel — ReporteFácil")
 
 
@@ -411,7 +569,7 @@ def create_report():
         m = analyze(df)
     except Exception as e:  # noqa: BLE001
         return page(portal_nav(u, 'dash') + err_box(f"No pude procesar el archivo: {esc(str(e))}") + back_link("/dashboard"))
-    s = ai_summary(m)
+    s = ai_summary(m, u["industry"])
     con = db()
     cur = con.execute("INSERT INTO reports (user_id, filename, metrics, summary, created_at) VALUES (?,?,?,?,?)",
                       (u["id"], f.filename, json.dumps(m, ensure_ascii=False), s, now()))
@@ -991,7 +1149,9 @@ AUTH_FORM = """
     document.getElementById('t').textContent = mode === 'registro' ? 'Crea tu cuenta gratis' : 'Bienvenido de vuelta';
     if (mode === 'registro') {
       document.getElementById('biz').innerHTML =
-        '<input type="text" name="business" placeholder="Nombre de tu negocio (opcional)" class="full">';
+        '<input type="text" name="business" placeholder="Nombre de tu negocio (opcional)" class="full">'
+        + '<select name="industry" class="full"><option value="">Sector de tu negocio (opcional)...</option>'
+        + __INDUSTRIES__.map(i => '<option>' + i + '</option>').join('') + '</select>';
       document.getElementById('alt').innerHTML = '¿Ya tienes cuenta? <a href="/login">Entra aquí</a>';
     } else {
       document.getElementById('alt').innerHTML = '¿No tienes cuenta? <a href="/registro">Créala gratis</a>';

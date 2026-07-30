@@ -28,6 +28,7 @@ API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "cambiame")
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "")
 PLAN_PRICE = os.getenv("PLAN_PRICE", "$29/mes")
+SUPPORT_EMAIL = os.getenv("SUPPORT_EMAIL", "")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "portal.db")
 
@@ -206,6 +207,53 @@ def landing():
     nav = ('<a class="btn" href="/dashboard">Mi panel</a>' if logged else
            '<a class="navlink" href="/login">Entrar</a><a class="btn" href="/registro">Crear cuenta gratis</a>')
     return page(LANDING_BODY.replace("__NAV__", nav), "ReporteFácil — Tus ventas, explicadas cada lunes")
+
+
+@app.route("/privacidad")
+def privacy():
+    contact = f"<p>Contacto: <a href='mailto:{esc(SUPPORT_EMAIL)}'>{esc(SUPPORT_EMAIL)}</a></p>" if SUPPORT_EMAIL else \
+        "<p>Contacto: a través del sistema de soporte de tu cuenta.</p>"
+    body = f"""
+    <div class="topbar"><a class="brand" href="/">Reporte<span>Fácil</span></a></div>
+    {back_link('/', 'Volver al inicio')}
+    <div class="card legal">
+      <h2>Política de privacidad</h2>
+      <p><b>Tu archivo no se guarda.</b> Cuando usas el demo, tu archivo se procesa en memoria y se
+      descarta al terminar el análisis. No lo almacenamos, no lo compartimos, no lo usamos para nada más.</p>
+      <p><b>Con cuenta, guardamos solo lo mínimo:</b> tu correo, el nombre de tu negocio si lo das, y las
+      métricas calculadas de tus reportes (totales, promedios, top de productos) para tu historial.
+      El archivo original nunca se almacena.</p>
+      <p><b>Tu contraseña está cifrada</b> con hashing estándar de la industria (nunca la vemos ni podemos verla).</p>
+      <p><b>Pagos:</b> se procesan en plataformas externas (PayPal o pasarelas locales). Nunca ingresas
+      datos de tarjeta en ReporteFácil y nunca tenemos acceso a ellos.</p>
+      <p><b>No vendemos ni compartimos tus datos</b> con terceros. Puedes pedir la eliminación de tu
+      cuenta y todos tus datos en cualquier momento por soporte.</p>
+      {contact}
+    </div>"""
+    return page(body, "Privacidad — ReporteFácil")
+
+
+@app.route("/terminos")
+def terms():
+    body = f"""
+    <div class="topbar"><a class="brand" href="/">Reporte<span>Fácil</span></a></div>
+    {back_link('/', 'Volver al inicio')}
+    <div class="card legal">
+      <h2>Términos del servicio</h2>
+      <p><b>El servicio:</b> ReporteFácil genera reportes analíticos a partir de archivos de ventas que tú
+      subes. Los reportes son informativos y no constituyen asesoría financiera, contable ni tributaria.</p>
+      <p><b>Plan gratuito:</b> reportes manuales ilimitados, sin tarjeta ni compromiso.</p>
+      <p><b>Plan Pro ({esc(PLAN_PRICE)}):</b> se paga por adelantado vía link de pago externo. La activación se
+      confirma en un máximo de 24 horas. Puedes cancelar cuando quieras: la cancelación aplica al
+      siguiente período y no se factura nada más.</p>
+      <p><b>Reembolsos:</b> si el servicio no funciona como se describe y soporte no logra resolverlo
+      en 7 días, te devolvemos el mes en curso.</p>
+      <p><b>Uso aceptable:</b> no subas archivos con datos que no tengas derecho a procesar.
+      Cada cuenta es para un negocio.</p>
+      <p><b>Disponibilidad:</b> el servicio se ofrece "como está"; hacemos lo razonable por mantenerlo
+      disponible y tus datos seguros.</p>
+    </div>"""
+    return page(body, "Términos — ReporteFácil")
 
 
 @app.route("/subscribe", methods=["POST"])
@@ -409,6 +457,8 @@ def plan():
             <div class="row">{pay}
             <form action="/plan/ya-pague" method="post"><button class="btn ghost">Ya pagué — verificar</button></form></div>
             <p class="muted sm">Tras pagar, pulsa "Ya pagué". Activamos tu cuenta en menos de 24 h.</p>
+            <div class="paynote">🔐 <span>El pago se procesa de forma segura en la plataforma del proveedor (PayPal o pasarela local).
+            <b>Nunca ingresas datos de tarjeta en ReporteFácil.</b> Ver <a href="/terminos">términos</a> y política de reembolso.</span></div>
           </div>
         </div>""",
         "pending": "<div class='card'><h3>Pago en verificación</h3><p>Activamos tu plan Pro en menos de 24 horas. Si tarda más, abre un ticket de soporte y lo resolvemos.</p></div>",
@@ -624,6 +674,7 @@ LAYOUT = """<!doctype html>
 <title>__TITLE__</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Sube tu Excel de ventas y recibe un reporte ejecutivo claro con gráficas y resumen con IA, en español.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230e9f6e'/%3E%3Cpath d='M8 22V14M14 22V10M20 22V16M26 22V12' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
@@ -728,7 +779,18 @@ LAYOUT = """<!doctype html>
   details summary { cursor:pointer; font-weight:650; font-size:.98rem; }
   details p { margin-top:10px; color:var(--ink2); font-size:.93rem; }
   .foot { text-align:center; color:var(--ink2); font-size:.82rem; margin-top:64px; padding-top:24px; border-top:1px solid var(--line); }
+  .foot a { color:var(--ink2); text-decoration:underline; margin:0 6px; }
   .authcard { max-width:420px; margin:40px auto; }
+  .legal { max-width:720px; margin:20px auto; } .legal p { margin:12px 0; color:var(--ink2); }
+  .legal h2 { margin-bottom:6px; color:var(--ink); } .legal b { color:var(--ink); }
+  .trustgrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; margin:18px 0; }
+  .trustcard { background:var(--card); border:1px solid var(--line); border-radius:var(--r); padding:22px; box-shadow:var(--shadow); }
+  .trustcard .ic { display:inline-flex; width:38px; height:38px; align-items:center; justify-content:center;
+    background:#d9f2e5; border-radius:11px; margin-bottom:10px; font-size:1.1rem; }
+  .trustcard b { display:block; margin-bottom:4px; }
+  .trustcard span { color:var(--ink2); font-size:.9rem; }
+  .paynote { display:flex; gap:10px; align-items:flex-start; background:#f0fdf7; border:1px solid #d3e9de;
+    border-radius:11px; padding:12px 16px; margin-top:12px; font-size:.88rem; color:var(--ink2); }
 </style>
 </head>
 <body><div class="wrap">__CONTENT__</div>
@@ -814,6 +876,16 @@ LANDING_BODY = """
     <div class="step"><span class="n">3</span><b>Decide con datos</b><span>El resumen ejecutivo te dice qué va bien, qué preocupa y qué hacer esta semana.</span></div>
   </div>
 
+  <div class="sectionhead"><div class="kicker">Tu información, protegida</div><h2>Diseñado para que confíes.</h2></div>
+  <div class="trustgrid">
+    <div class="trustcard"><span class="ic">🗂️</span><b>Tu archivo no se guarda</b>
+      <span>El demo procesa tu Excel en memoria y lo descarta. Con cuenta, solo guardamos las métricas — nunca el archivo original.</span></div>
+    <div class="trustcard"><span class="ic">🔒</span><b>Contraseñas cifradas</b>
+      <span>Hashing estándar de la industria y conexión HTTPS en todo el sitio. Ni nosotros podemos ver tu contraseña.</span></div>
+    <div class="trustcard"><span class="ic">💳</span><b>Tu tarjeta, nunca aquí</b>
+      <span>Los pagos se procesan en PayPal o pasarelas locales. Jamás ingresas datos de tarjeta en ReporteFácil.</span></div>
+  </div>
+
   <div class="sectionhead"><div class="kicker">Precios</div><h2>Empieza gratis. Crece cuando te sirva.</h2></div>
   <div class="plans">
     <div class="plancard">
@@ -844,7 +916,8 @@ LANDING_BODY = """
     <div class="cta"><a class="btn big" href="/registro">Crear cuenta gratis</a></div>
   </div>
 
-  <div class="foot">ReporteFácil · hecho en Ecuador · <a href="/login">Entrar</a></div>
+  <div class="foot">ReporteFácil · hecho en Ecuador<br>
+    <a href="/privacidad">Privacidad</a> · <a href="/terminos">Términos</a> · <a href="/login">Entrar</a> · <a href="/registro">Crear cuenta</a></div>
 
 <script>
 async function sub() {

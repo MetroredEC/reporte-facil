@@ -107,6 +107,8 @@ def find_col(df, hints, want_numeric=None):
 def analyze(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
+    df = df.loc[:, ~df.columns.duplicated()]          # columnas duplicadas rompen groupby
+    df = df.dropna(axis=1, how="all")                  # columnas 100% vacías no aportan
     amount_col = find_col(df, AMOUNT_HINTS, want_numeric=True)
     date_col = find_col(df, DATE_HINTS)
     cat_col = find_col(df, CATEGORY_HINTS)
@@ -456,11 +458,14 @@ def report_demo():
         return jsonify(error="Sube un archivo .csv o .xlsx."), 400
     try:
         df = parse_upload(f)
+        if df.empty:
+            return jsonify(error="El archivo está vacío."), 400
+        m = analyze(df)
     except Exception as e:  # noqa: BLE001
-        return jsonify(error=str(e)), 400
-    if df.empty:
-        return jsonify(error="El archivo está vacío."), 400
-    m = analyze(df)
+        app.logger.exception("report-demo fallo")
+        return jsonify(error=f"No pude procesar el archivo ({type(e).__name__}). "
+                             "Verifica que tenga encabezados en la primera fila y al menos una columna de montos. "
+                             f"Detalle: {str(e)[:150]}"), 400
     return jsonify(metrics=m, resumen=ai_summary(m))
 
 
@@ -1019,6 +1024,22 @@ LAYOUT = """<!doctype html>
   .bigsection { text-align:center; padding:70px 0 10px; }
   .bigsection h2 { font-size:clamp(1.7rem,4vw,2.6rem); letter-spacing:-.035em; font-weight:800; }
   .bigsection p { color:var(--ink2); max-width:560px; margin:14px auto 0; font-size:1.05rem; }
+  /* ------ capa de movimiento ------ */
+  @media (prefers-reduced-motion: no-preference) {
+    .hero h1, .hero .lead, .hero .cta, .hero .trust { opacity:0; animation:riseIn .7s cubic-bezier(.2,.7,.2,1) forwards; }
+    .hero .lead { animation-delay:.12s; } .hero .cta { animation-delay:.24s; } .hero .trust { animation-delay:.34s; }
+    .browserframe { opacity:0; transform:translateY(26px) scale(.985); animation:frameIn .9s .35s cubic-bezier(.2,.7,.2,1) forwards; }
+    .reveal { opacity:0; transform:translateY(26px); transition:opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1); }
+    .reveal.in { opacity:1; transform:none; }
+    .reveal.d1 { transition-delay:.08s; } .reveal.d2 { transition-delay:.16s; } .reveal.d3 { transition-delay:.24s; }
+    .trustcard, .step, .plancard { transition:transform .25s cubic-bezier(.2,.7,.2,1), box-shadow .25s, opacity .7s, border-color .2s; }
+    .trustcard:hover, .step:hover { transform:translateY(-5px); box-shadow:0 2px 4px rgba(14,27,44,.06), 0 18px 44px rgba(14,27,44,.12); }
+    .plancard:hover { transform:translateY(-5px) scale(1.01); }
+    .hero h1 em { background-size:200% 100%; animation:riseIn .7s forwards, shimmer 6s 1s ease-in-out infinite; }
+  }
+  @keyframes riseIn { from { opacity:0; transform:translateY(18px); } to { opacity:1; transform:none; } }
+  @keyframes frameIn { from { opacity:0; transform:translateY(26px) scale(.985); } to { opacity:1; transform:none; } }
+  @keyframes shimmer { 0%,100% { background-position:0% 50%; } 50% { background-position:100% 50%; } }
   .cta { display:flex; gap:10px; justify-content:center; margin:30px 0 8px; flex-wrap:wrap; }
   .cta input { min-width:280px; }
   .trust { color:var(--ink2); font-size:.82rem; }
@@ -1293,6 +1314,37 @@ const drop = document.getElementById('drop');
 ['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('on'); }));
 drop.addEventListener('drop', ev => up(ev.dataTransfer.files[0]));
 
+// Animaciones: reveal al hacer scroll + contadores animados
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.statgrid .stat, .trustgrid .trustcard, .steps .step, .plans .plancard, .bigsection, details')
+    .forEach((el, i) => { el.classList.add('reveal', 'd' + (i % 3 + 1)); });
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(en => { if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); } });
+  }, { threshold: 0.15 });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+  // contadores de la fila de stats
+  const cio = new IntersectionObserver(entries => {
+    entries.forEach(en => {
+      if (!en.isIntersecting) return;
+      cio.unobserve(en.target);
+      const b = en.target.querySelector('b');
+      if (!b) return;
+      const html = b.innerHTML, txt = b.textContent;
+      const num = parseFloat(txt.replace(/[^0-9.]/g, ''));
+      if (isNaN(num) || num === 0) return;
+      let cur = 0; const steps = 28; const inc = num / steps;
+      const tick = () => {
+        cur += inc;
+        if (cur >= num) { b.innerHTML = html; return; }
+        b.textContent = txt.replace(/[0-9.]+/, Math.round(cur));
+        requestAnimationFrame(() => setTimeout(tick, 26));
+      };
+      tick();
+    });
+  }, { threshold: 0.6 });
+  document.querySelectorAll('.statgrid .stat').forEach(el => cio.observe(el));
+});
+
 // Mockup del producto en el hero — datos de EJEMPLO, etiquetados como tales.
 window.addEventListener('load', () => {
   const mock = document.getElementById('mockreport');
@@ -1323,19 +1375,34 @@ window.addEventListener('load', () => {
   mock.insertAdjacentHTML('beforeend',
     '<p class="muted sm" style="margin-top:10px">Ejemplo con datos ficticios. Abajo puedes generarlo con tus datos reales.</p>');
 });
-async function up(file) {
+async function up(file, intento) {
   if (!file) return;
+  intento = intento || 1;
   const out = document.getElementById('result');
   out.innerHTML = '<p class="muted">Analizando ' + escH(file.name) + '…</p>';
   const fd = new FormData(); fd.append('file', file);
   try {
     const r = await fetch('/report-demo', { method:'POST', body: fd });
+    const ct = r.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) throw new Error('cold-start');
     const d = await r.json();
     if (d.error) { out.innerHTML = '<div class="card errbox">'+escH(d.error)+'</div>'; return; }
     renderReport(out, d);
     out.insertAdjacentHTML('beforeend',
       '<div class="row" style="justify-content:center"><a class="btn" href="/registro">Crear cuenta para guardar este reporte</a></div>');
-  } catch(e) { out.innerHTML = '<div class="card errbox">Error: '+escH(String(e))+'</div>'; }
+  } catch(e) {
+    if (intento < 3) {
+      let s = 20;
+      out.innerHTML = '<p class="muted">El servidor está despertando (plan gratuito) — reintento en <b id="cd">'+s+'</b> s…</p>';
+      const t = setInterval(() => {
+        s--; const el = document.getElementById('cd');
+        if (el) el.textContent = s;
+        if (s <= 0) { clearInterval(t); up(file, intento + 1); }
+      }, 1000);
+    } else {
+      out.innerHTML = '<div class="card errbox">No pude conectar con el servidor. Espera un minuto y vuelve a intentar.</div>';
+    }
+  }
 }
 </script>""".replace("__PRICE__", PLAN_PRICE)
 

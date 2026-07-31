@@ -1088,6 +1088,8 @@ function money(n) { return '$' + Number(n).toLocaleString('es-EC', {maximumFract
 function escH(s){const d=document.createElement('div');d.textContent=s??'';return d.innerHTML;}
 function kpiH(v,l,cls){ return '<div class="kpi '+(cls||'')+'"><b>'+v+'</b><span>'+l+'</span></div>'; }
 function renderReport(root, data) {
+  // IDs unicos por invocacion: el mockup del hero y el demo pueden coexistir
+  const uid = 'rc' + (renderReport._n = (renderReport._n || 0) + 1) + '-';
   const m = data.metrics; let h = '';
   h += '<div class="kpis">';
   if (m.total !== undefined) {
@@ -1113,10 +1115,10 @@ function renderReport(root, data) {
   const hasMes = m.serie_mensual && m.serie_mensual.length > 1;
   if (hasSerie || hasTop || hasDow || hasMes) {
     h += '<div class="charts">';
-    if (hasSerie) h += '<div class="chartbox"><h4>Ventas por semana</h4><canvas id="c-serie" height="220"></canvas></div>';
-    if (hasTop) h += '<div class="chartbox"><h4>Top ' + escH(String(m.col_categoria||'categorías')) + '</h4><canvas id="c-top" height="220"></canvas></div>';
-    if (hasDow) h += '<div class="chartbox"><h4>¿Qué días vendes más?</h4><canvas id="c-dow" height="220"></canvas></div>';
-    if (hasMes) h += '<div class="chartbox"><h4>Evolución mensual</h4><canvas id="c-mes" height="220"></canvas></div>';
+    if (hasSerie) h += '<div class="chartbox"><h4>Ventas por semana</h4><canvas id="'+uid+'serie" height="220"></canvas></div>';
+    if (hasTop) h += '<div class="chartbox"><h4>Top ' + escH(String(m.col_categoria||'categorías')) + '</h4><canvas id="'+uid+'top" height="220"></canvas></div>';
+    if (hasDow) h += '<div class="chartbox"><h4>¿Qué días vendes más?</h4><canvas id="'+uid+'dow" height="220"></canvas></div>';
+    if (hasMes) h += '<div class="chartbox"><h4>Evolución mensual</h4><canvas id="'+uid+'mes" height="220"></canvas></div>';
     h += '</div>';
   }
   if (m.productos_caida && m.productos_caida.length) {
@@ -1139,7 +1141,7 @@ function renderReport(root, data) {
   const noLegend = { plugins:{legend:{display:false}} };
   const yMoney = { ticks:{ callback:v=>money(v) }, grid:{color:'#eef2f7'} };
   if (hasSerie) {
-    new Chart(document.getElementById('c-serie'), { type:'line',
+    new Chart(document.getElementById(uid+'serie'), { type:'line',
       data:{ labels:m.serie_semanal.map(x=>x.semana.split('/')[0]),
         datasets:[{ data:m.serie_semanal.map(x=>x.total), borderColor:'#0e9f6e',
           backgroundColor:'rgba(14,159,110,.09)', fill:true, tension:.35, pointRadius:3,
@@ -1147,7 +1149,7 @@ function renderReport(root, data) {
       options:{ ...noLegend, scales:{ y:yMoney, x:{ grid:{display:false} } } } });
   }
   if (hasTop) {
-    new Chart(document.getElementById('c-top'), { type:'bar',
+    new Chart(document.getElementById(uid+'top'), { type:'bar',
       data:{ labels:m.top_categorias.map(x=>x.nombre),
         datasets:[{ data:m.top_categorias.map(x=>x.total),
           backgroundColor:['#0e9f6e','#2563eb','#7c3aed','#d97706','#64748b'], borderRadius:8 }]},
@@ -1156,14 +1158,14 @@ function renderReport(root, data) {
   }
   if (hasDow) {
     const best = Math.max(...m.por_dia.map(x=>x.total));
-    new Chart(document.getElementById('c-dow'), { type:'bar',
+    new Chart(document.getElementById(uid+'dow'), { type:'bar',
       data:{ labels:m.por_dia.map(x=>x.dia.slice(0,3)),
         datasets:[{ data:m.por_dia.map(x=>x.total), borderRadius:8,
           backgroundColor:m.por_dia.map(x=>x.total===best?'#0e9f6e':'#c7d2e0') }]},
       options:{ ...noLegend, scales:{ y:yMoney, x:{ grid:{display:false} } } } });
   }
   if (hasMes) {
-    new Chart(document.getElementById('c-mes'), { type:'bar',
+    new Chart(document.getElementById(uid+'mes'), { type:'bar',
       data:{ labels:m.serie_mensual.map(x=>x.mes),
         datasets:[{ data:m.serie_mensual.map(x=>x.total), backgroundColor:'#2563eb', borderRadius:8 }]},
       options:{ ...noLegend, scales:{ y:yMoney, x:{ grid:{display:false} } } } });
@@ -1387,9 +1389,14 @@ async function up(file, intento) {
     if (!ct.includes('application/json')) throw new Error('cold-start');
     const d = await r.json();
     if (d.error) { out.innerHTML = '<div class="card errbox">'+escH(d.error)+'</div>'; return; }
-    renderReport(out, d);
-    out.insertAdjacentHTML('beforeend',
-      '<div class="row" style="justify-content:center"><a class="btn" href="/registro">Crear cuenta para guardar este reporte</a></div>');
+    try {
+      renderReport(out, d);
+      out.insertAdjacentHTML('beforeend',
+        '<div class="row" style="justify-content:center"><a class="btn" href="/registro">Crear cuenta para guardar este reporte</a></div>');
+    } catch(re) {
+      out.innerHTML = '<div class="card errbox">El análisis funcionó pero falló el dibujado: '+escH(String(re))+'</div>';
+    }
+    return;
   } catch(e) {
     if (intento < 3) {
       let s = 20;
